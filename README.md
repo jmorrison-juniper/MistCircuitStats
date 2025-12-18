@@ -197,3 +197,7 @@ Joseph Morrison <jmorrison@juniper.net>
 - [MistGuestAuthorizations](https://github.com/jmorrison-juniper/MistGuestAuthorizations) - Mist Guest WiFi Pre-Authorization Portal
 - [MistSiteDashboard](https://github.com/jmorrison-juniper/MistSiteDashboard) - Mist Site Health Dashboard
 - [MistHelper](https://github.com/jmorrison-juniper/MistHelper) - Mist API Helper Tools
+
+---
+
+Made with ❤️ for the Juniper Mist community
