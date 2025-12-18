@@ -281,6 +281,9 @@
                     <button type="button" class="btn btn-sm btn-outline-light" onclick="changeTimeframe('7d')" id="btn-7d">7 Days</button>
                 </div>
                 <span class="badge bg-secondary me-2" id="orgBadge">Loading...</span>
+                <button class="btn btn-sm btn-outline-light me-2" onclick="downloadCSV()">
+                    <i class="bi bi-download"></i> Export CSV
+                </button>
                 <button class="btn btn-sm btn-outline-light" onclick="refreshData()">
                     <i class="bi bi-arrow-clockwise"></i> Refresh
                 </button>
@@ -647,6 +650,90 @@
             document.getElementById('gatewayContainer').style.display = 'none';
             loadData();
             showToast('Data refreshed successfully', 'success');
+        }
+        
+        function downloadCSV() {
+            if (!allGateways || allGateways.length === 0) {
+                showToast('No data available to export', 'danger');
+                return;
+            }
+            
+            // Build CSV content
+            const headers = ['Site', 'Gateway', 'Model', 'Status', 'Port ID', 'Port Description', 'IP Address', 'RX Bytes', 'TX Bytes', 'RX Rate (bps)', 'TX Rate (bps)', 'Port Status'];
+            const rows = [headers];
+            
+            // Process each gateway
+            allGateways.forEach(gateway => {
+                const siteName = gateway.site_name || 'Unknown';
+                const gatewayName = gateway.name || gateway.id;
+                const model = gateway.model || '';
+                const status = gateway.status || 'unknown';
+                
+                if (gateway.ports && gateway.ports.length > 0) {
+                    gateway.ports.forEach(port => {
+                        rows.push([
+                            siteName,
+                            gatewayName,
+                            model,
+                            status,
+                            port.port_id || '',
+                            port.port_desc || '',
+                            port.ip_address || '',
+                            port.rx_bytes || 0,
+                            port.tx_bytes || 0,
+                            port.rx_bps || 0,
+                            port.tx_bps || 0,
+                            port.up ? 'Up' : 'Down'
+                        ]);
+                    });
+                } else {
+                    // Gateway with no WAN ports
+                    rows.push([
+                        siteName,
+                        gatewayName,
+                        model,
+                        status,
+                        '',
+                        '',
+                        '',
+                        0,
+                        0,
+                        0,
+                        0,
+                        'N/A'
+                    ]);
+                }
+            });
+            
+            // Convert to CSV string
+            const csvContent = rows.map(row => 
+                row.map(cell => {
+                    // Escape quotes and wrap in quotes if contains comma, quote, or newline
+                    const cellStr = String(cell);
+                    if (cellStr.includes(',') || cellStr.includes('"') || cellStr.includes('\n')) {
+                        return '"' + cellStr.replace(/"/g, '""') + '"';
+                    }
+                    return cellStr;
+                }).join(',')
+            ).join('\n');
+            
+            // Create download link
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(blob);
+            
+            // Generate filename with timestamp and timeframe
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+            const filename = `mist-circuit-stats-${currentDuration}-${timestamp}.csv`;
+            
+            link.setAttribute('href', url);
+            link.setAttribute('download', filename);
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            showToast('CSV exported successfully', 'success');
         }
         
         function showToast(message, type = 'info') {
