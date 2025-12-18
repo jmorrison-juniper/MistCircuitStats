@@ -609,6 +609,7 @@
                                 <th>Physical Status</th>
                                 <th>Gateway IP</th>
                                 <th>WAN IP</th>
+                                <th>VLAN</th>
                                 <th>CIDR</th>
                                 <th>Config Type</th>
                                 <th>Override</th>
@@ -618,7 +619,12 @@
                             </tr>
                         </thead>
                         <tbody>
-                            ${gateway.ports.map(port => `
+                            ${gateway.ports.map(port => {
+                                // Extract VLAN from port name (e.g., ge-0/0/0.20 -> 20)
+                                const vlanMatch = port.name.match(/\.(\d+)$/);
+                                const vlan = vlanMatch ? vlanMatch[1] : '-';
+                                
+                                return `
                                 <tr>
                                     <td><strong>${port.name}</strong></td>
                                     <td>${port.description || '-'}</td>
@@ -634,6 +640,7 @@
                                     </td>
                                     <td>${port.gateway || '-'}</td>
                                     <td>${port.ip || '-'}</td>
+                                    <td>${vlan}</td>
                                     <td>${port.netmask ? '/' + port.netmask : '-'}</td>
                                     <td><span class="badge ${port.type === 'static' ? 'bg-success' : 'bg-primary'}">${port.type.toUpperCase()}</span></td>
                                     <td><span class="badge ${port.override === 'yes' ? 'bg-danger' : 'bg-success'}">${port.override.toUpperCase()}</span></td>
@@ -642,8 +649,8 @@
                                     </td>
                                     <td class="traffic-cell" onclick="showTrafficChart('${gateway.site_id}', '${gateway.id}', '${port.name}', '${gateway.name}')" title="Click to view traffic chart">${formatBytes(port.rx_bytes)}</td>
                                     <td class="traffic-cell" onclick="showTrafficChart('${gateway.site_id}', '${gateway.id}', '${port.name}', '${gateway.name}')" title="Click to view traffic chart">${formatBytes(port.tx_bytes)}</td>
-                                </tr>
-                            `).join('')}
+                                </tr>`;
+                            }).join('')}
                         </tbody>
                     </table>
                 </div>
@@ -694,7 +701,7 @@
             const headers = [
                 'Site Name', 'Router Hostname', 'Model', 'Status', 'External IP', 'Uptime',
                 'Port Name', 'Description', 'Enablement', 'Physical Status', 
-                'Gateway IP', 'WAN IP', 'CIDR', 'Config Type', 'Override', 'Peer Paths',
+                'Gateway IP', 'WAN IP', 'VLAN', 'CIDR', 'Config Type', 'Override', 'Peer Paths',
                 'RX Data (Bytes)', 'TX Data (Bytes)'
             ];
             const rows = [headers];
@@ -717,6 +724,10 @@
                 
                 if (gateway.ports && gateway.ports.length > 0) {
                     gateway.ports.forEach(port => {
+                        // Extract VLAN from port name
+                        const vlanMatch = port.name.match(/\.(\d+)$/);
+                        const vlan = vlanMatch ? vlanMatch[1] : '-';
+                        
                         const peers = peersByPort[port.name] || [];
                         const upCount = peers.filter(p => p.up).length;
                         const totalCount = peers.length;
@@ -735,6 +746,7 @@
                             port.up ? 'Up' : 'Down',
                             port.gateway || '',
                             port.ip || '',
+                            vlan,
                             port.netmask ? '/' + port.netmask : '',
                             port.type ? port.type.toUpperCase() : '',
                             port.override ? port.override.toUpperCase() : '',
@@ -752,7 +764,7 @@
                         status,
                         ipAddress,
                         uptime,
-                        '', '', '', '', '', '', '', '', '', '-', 0, 0
+                        '', '', '', '', '', '', '', '', '', '', '-', 0, 0
                     ]);
                 }
             });
