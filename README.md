@@ -8,12 +8,14 @@ A Flask web application that displays Gateway WAN port statistics from all gatew
 
 ## Features
 
-- 📊 Real-time gateway WAN port statistics
+- 📊 Real-time gateway WAN port statistics with windowed time ranges
+- 📈 Interactive time-series charts (click any RX/TX cell to view)
+- ⏱️ Multiple timeframe options: 15 minutes, 1 hour, 24 hours, 7 days
 - 🌐 Organization-wide gateway overview
 - 📱 Responsive dark theme UI with T-Mobile magenta accents
 - 🔍 Search and filter by site or gateway name
-- 📈 Traffic statistics (RX/TX bytes, packets, errors)
-- 🎯 Per-port detailed statistics
+- 📉 20-point resolution charts with unique data points per timeframe
+- 🎯 Per-port detailed statistics and configuration
 - 🐳 Multi-architecture Docker support (amd64/arm64)
 - 🔄 Automatic CI/CD with GitHub Actions
 
@@ -109,10 +111,11 @@ This mounts your local code into the container for live reloading.
 
 - `GET /` - Main dashboard UI
 - `GET /health` - Health check endpoint
-- `GET /api/organizations` - List organizations
+- `GET /api/organization` - Get organization information
 - `GET /api/sites` - List sites in organization
-- `GET /api/gateways` - Get all gateways with WAN port stats
+- `GET /api/gateways?duration=<15m|1h|1d|7d>` - Get all gateways with windowed port stats
 - `GET /api/gateway/<id>/ports` - Get detailed port stats for a gateway
+- `GET /api/gateway/<gateway_id>/port/<port_id>/traffic` - Get time-series traffic data (20 data points)
 
 ## Architecture
 
@@ -157,10 +160,12 @@ Images are built for:
 ### Project Structure
 
 - **Flask Application** (`app.py`): Routes and API endpoints
-- **Mist Connection** (`mist_connection.py`): Wrapper for mistapi SDK
-- **Frontend** (`templates/index.html`): Bootstrap 5.3.2 with dark theme
+- **Mist Connection** (`mist_connection.py`): Wrapper for mistapi SDK with windowed statistics
+- **Frontend** (`templates/index.html`): Bootstrap 5.3.2 with dark theme and Chart.js
+- **Charting**: Chart.js 4.4.0 for interactive time-series visualization
 - **Styling**: T-Mobile magenta accent (#E20074)
 - **Layout**: Optimized for iPad landscape (3-column grid)
+- **API Integration**: Mist Insights API for port-specific time-series data
 
 ### Running Tests
 
@@ -218,11 +223,38 @@ For issues, questions, or contributions:
 - Open an issue on [GitHub](https://github.com/jmorrison-juniper/MistCircuitStats/issues)
 - Review the [Mist API documentation](https://api.mist.com/api/v1/docs)
 
+## Technical Details
+
+### Windowed Statistics
+
+The application uses the Mist Insights API to provide windowed traffic statistics rather than cumulative counters:
+- Each timeframe retrieves port-specific time-series data
+- Traffic is calculated by summing bandwidth over the selected interval
+- This provides accurate "traffic in the last X hours" metrics
+
+### Time-Series Charts
+
+- Click any RX/TX data cell to view an interactive chart
+- Charts display 20 data points with unique values per timeframe
+- RX (download) shown in blue, TX (upload) in green
+- Automatic interval calculation: `duration / 20` for optimal resolution
+- Charts use Mist's gateway insights endpoint for port-specific data
+
+### Interval Calculations
+
+| Timeframe | Duration | Interval | Data Points |
+|-----------|----------|----------|-------------|
+| 15 minutes | 900s | 45s | 20 |
+| 1 hour | 3,600s | 180s | 20 |
+| 24 hours | 86,400s | 4,320s | 20 |
+| 7 days | 604,800s | 30,240s | 20 |
+
 ## Acknowledgments
 
 - Built with [Flask](https://flask.palletsprojects.com/)
 - Uses [mistapi SDK](https://pypi.org/project/mistapi/)
 - Styled with [Bootstrap 5.3.2](https://getbootstrap.com/)
+- Charts with [Chart.js 4.4.0](https://www.chartjs.org/)
 - Icons from [Bootstrap Icons](https://icons.getbootstrap.com/)
 
 ---
