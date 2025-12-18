@@ -507,3 +507,79 @@ class MistConnection:
         except Exception as e:
             logger.error(f"Error getting gateway port stats: {str(e)}")
             raise
+    
+    def get_vpn_peer_stats(self, site_id: str, device_mac: str) -> Dict:
+        """
+        Get VPN peer path statistics for a gateway
+        
+        Args:
+            site_id: Site ID
+            device_mac: Device MAC address
+            
+        Returns:
+            Dictionary with peer path statistics grouped by port_id
+        """
+        import requests
+        
+        try:
+            if not self.org_id:
+                raise ValueError("Organization ID is required")
+            
+            headers = {
+                'Authorization': f'Token {self.api_token}',
+                'Content-Type': 'application/json'
+            }
+            
+            url = f'https://{self.host}/api/v1/orgs/{self.org_id}/stats/vpn_peers/search'
+            params = {
+                'site_id': site_id,
+                'mac': device_mac
+            }
+            
+            response = requests.get(url, headers=headers, params=params)
+            
+            if response.status_code == 200:
+                data = response.json()
+                results = data.get('results', [])
+                
+                # Group peer paths by port_id
+                peers_by_port = {}
+                for peer in results:
+                    port_id = peer.get('port_id', '')
+                    if port_id not in peers_by_port:
+                        peers_by_port[port_id] = []
+                    peers_by_port[port_id].append({
+                        'vpn_name': peer.get('vpn_name', ''),
+                        'peer_router_name': peer.get('peer_router_name', ''),
+                        'peer_port_id': peer.get('peer_port_id', ''),
+                        'up': peer.get('up', False),
+                        'is_active': peer.get('is_active', False),
+                        'latency': peer.get('latency', 0),
+                        'loss': peer.get('loss', 0),
+                        'jitter': peer.get('jitter', 0),
+                        'mos': peer.get('mos', 0),
+                        'uptime': peer.get('uptime', 0),
+                        'mtu': peer.get('mtu', 0),
+                        'type': peer.get('type', ''),
+                        'hop_count': peer.get('hop_count', 0)
+                    })
+                
+                return {
+                    'success': True,
+                    'peers_by_port': peers_by_port,
+                    'total_peers': len(results)
+                }
+            else:
+                logger.warning(f"VPN peer stats API error {response.status_code} for device {device_mac}")
+                return {
+                    'success': False,
+                    'peers_by_port': {},
+                    'total_peers': 0
+                }
+        except Exception as e:
+            logger.warning(f"Error fetching VPN peer stats for device {device_mac}: {str(e)}")
+            return {
+                'success': False,
+                'peers_by_port': {},
+                'total_peers': 0
+            }

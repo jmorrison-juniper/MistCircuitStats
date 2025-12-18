@@ -170,6 +170,27 @@ def get_port_traffic(gateway_id, port_id):
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/gateway/<gateway_id>/vpn_peers')
+def get_vpn_peers(gateway_id):
+    """Get VPN peer path statistics for a gateway"""
+    try:
+        site_id = request.args.get('site_id')
+        device_mac = request.args.get('mac')
+        
+        if not site_id or not device_mac:
+            return jsonify({'success': False, 'error': 'site_id and mac are required'}), 400
+        
+        logger.info(f"Fetching VPN peers for gateway {gateway_id} (MAC: {device_mac})")
+        
+        peer_stats = mist.get_vpn_peer_stats(site_id, device_mac)
+        
+        return jsonify(peer_stats)
+            
+    except Exception as e:
+        logger.error(f"Error fetching VPN peers: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=(LOG_LEVEL == 'DEBUG'))

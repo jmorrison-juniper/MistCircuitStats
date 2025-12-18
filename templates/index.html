@@ -265,6 +265,15 @@
             max-width: 400px;
             margin-bottom: 1rem;
         }
+        
+        .peer-paths-badge {
+            transition: all 0.2s;
+        }
+        
+        .peer-paths-badge:hover {
+            transform: scale(1.1);
+            box-shadow: 0 0 10px rgba(226, 0, 116, 0.5);
+        }
     </style>
 </head>
 <body>
@@ -426,11 +435,27 @@
         </div>
     </div>
 
+    <!-- Peer Paths Modal -->
+    <div class="modal fade" id="peerPathsModal" tabindex="-1">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="peerPathsModalTitle">VPN Peer Paths</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="peerPathsModalBody">
+                    <!-- Peer paths details will be loaded here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         let allGateways = [];
         let allSites = [];
         let currentDuration = '1d';
+        let vpnPeerCache = {};
         
         // Initialize on page load
         document.addEventListener('DOMContentLoaded', function() {
@@ -587,6 +612,7 @@
                                 <th>CIDR</th>
                                 <th>Config Type</th>
                                 <th>Override</th>
+                                <th>Peer Paths</th>
                                 <th>RX Data</th>
                                 <th>TX Data</th>
                             </tr>
@@ -611,6 +637,9 @@
                                     <td>${port.netmask ? '/' + port.netmask : '-'}</td>
                                     <td><span class="badge ${port.type === 'static' ? 'bg-success' : 'bg-primary'}">${port.type.toUpperCase()}</span></td>
                                     <td><span class="badge ${port.override === 'yes' ? 'bg-danger' : 'bg-success'}">${port.override.toUpperCase()}</span></td>
+                                    <td id="peer-paths-${gateway.id}-${port.name.replace(/[^a-zA-Z0-9]/g, '_')}">
+                                        <span class="text-muted"><i class="bi bi-hourglass-split"></i> Loading...</span>
+                                    </td>
                                     <td class="traffic-cell" onclick="showTrafficChart('${gateway.site_id}', '${gateway.id}', '${port.name}', '${gateway.name}')" title="Click to view traffic chart">${formatBytes(port.rx_bytes)}</td>
                                     <td class="traffic-cell" onclick="showTrafficChart('${gateway.site_id}', '${gateway.id}', '${port.name}', '${gateway.name}')" title="Click to view traffic chart">${formatBytes(port.tx_bytes)}</td>
                                 </tr>
@@ -621,6 +650,9 @@
             ` : '<p class="text-center text-muted my-3">No port configuration data available</p>';
             
             detailsRow.innerHTML = `<td colspan="8"><div class="port-details-container">${portsHtml}</div></td>`;
+            
+            // Load VPN peer stats for this gateway
+            loadVpnPeerStats(gateway);
             
             return detailsRow;
         }
@@ -662,7 +694,7 @@
             const headers = [
                 'Site Name', 'Router Hostname', 'Model', 'Status', 'External IP', 'Uptime',
                 'Port Name', 'Description', 'Enablement', 'Physical Status', 
-                'Gateway IP', 'WAN IP', 'CIDR', 'Config Type', 'Override', 
+                'Gateway IP', 'WAN IP', 'CIDR', 'Config Type', 'Override', 'Peer Paths',
                 'RX Data (Bytes)', 'TX Data (Bytes)'
             ];
             const rows = [headers];
@@ -679,8 +711,17 @@
                 const uptimeDays = Math.floor(uptimeHours / 24);
                 const uptime = uptimeDays > 0 ? `${uptimeDays}d ${uptimeHours % 24}h` : `${uptimeHours}h`;
                 
+                // Get peer paths from cache
+                const cacheKey = `${gateway.id}-${gateway.mac}`;
+                const peersByPort = vpnPeerCache[cacheKey] || {};
+                
                 if (gateway.ports && gateway.ports.length > 0) {
                     gateway.ports.forEach(port => {
+                        const peers = peersByPort[port.name] || [];
+                        const upCount = peers.filter(p => p.up).length;
+                        const totalCount = peers.length;
+                        const peerPathsStr = totalCount > 0 ? `${upCount}/${totalCount}` : '-';
+                        
                         rows.push([
                             siteName,
                             gatewayName,
@@ -697,6 +738,7 @@
                             port.netmask ? '/' + port.netmask : '',
                             port.type ? port.type.toUpperCase() : '',
                             port.override ? port.override.toUpperCase() : '',
+                            peerPathsStr,
                             port.rx_bytes || 0,
                             port.tx_bytes || 0
                         ]);
@@ -710,7 +752,7 @@
                         status,
                         ipAddress,
                         uptime,
-                        '', '', '', '', '', '', '', '', '', 0, 0
+                        '', '', '', '', '', '', '', '', '', '-', 0, 0
                     ]);
                 }
             });
@@ -985,6 +1027,173 @@
                     }
                 }
             });
+        }
+        
+        // VPN Peer Paths Functions
+        async function loadVpnPeerStats(gateway) {
+            try {
+                const cacheKey = `${gateway.id}-${gateway.mac}`;
+                
+                // Check cache first
+                if (vpnPeerCache[cacheKey]) {
+                    updatePeerPathCells(gateway, vpnPeerCache[cacheKey]);
+                    return;
+                }
+                
+                const response = await fetch(
+                    `/api/gateway/${gateway.id}/vpn_peers?site_id=${gateway.site_id}&mac=${gateway.mac}`
+                );
+                
+                if (!response.ok) {
+                    throw new Error('Failed to fetch VPN peer stats');
+                }
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    vpnPeerCache[cacheKey] = data.peers_by_port;
+                    updatePeerPathCells(gateway, data.peers_by_port);
+                } else {
+                    // No peers or error - mark as N/A
+                    gateway.ports.forEach(port => {
+                        const cellId = `peer-paths-${gateway.id}-${port.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+                        const cell = document.getElementById(cellId);
+                        if (cell) {
+                            cell.innerHTML = '<span class="text-muted">-</span>';
+                        }
+                    });
+                }
+            } catch (error) {
+                console.error('Error loading VPN peer stats:', error);
+                // Mark all cells as error
+                gateway.ports.forEach(port => {
+                    const cellId = `peer-paths-${gateway.id}-${port.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+                    const cell = document.getElementById(cellId);
+                    if (cell) {
+                        cell.innerHTML = '<span class="text-muted">-</span>';
+                    }
+                });
+            }
+        }
+        
+        function updatePeerPathCells(gateway, peersByPort) {
+            gateway.ports.forEach(port => {
+                const cellId = `peer-paths-${gateway.id}-${port.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+                const cell = document.getElementById(cellId);
+                
+                if (!cell) return;
+                
+                const peers = peersByPort[port.name] || [];
+                
+                if (peers.length === 0) {
+                    cell.innerHTML = '<span class="text-muted">-</span>';
+                    return;
+                }
+                
+                const upCount = peers.filter(p => p.up).length;
+                const totalCount = peers.length;
+                const allUp = upCount === totalCount;
+                
+                const badgeClass = allUp ? 'bg-success' : 'bg-danger';
+                const iconClass = allUp ? 'bi-check-circle' : 'bi-exclamation-triangle';
+                
+                cell.innerHTML = `
+                    <span class="badge ${badgeClass} peer-paths-badge" 
+                          onclick="showPeerPathsModal('${gateway.id}', '${gateway.name}', '${port.name}', '${gateway.site_id}', '${gateway.mac}')"
+                          style="cursor: pointer;" 
+                          title="Click to view peer path details">
+                        <i class="bi ${iconClass}"></i> ${upCount}/${totalCount}
+                    </span>
+                `;
+            });
+        }
+        
+        async function showPeerPathsModal(gatewayId, gatewayName, portName, siteId, mac) {
+            const cacheKey = `${gatewayId}-${mac}`;
+            const peersByPort = vpnPeerCache[cacheKey];
+            
+            if (!peersByPort) {
+                showToast('Peer path data not available', 'danger');
+                return;
+            }
+            
+            const peers = peersByPort[portName] || [];
+            
+            if (peers.length === 0) {
+                showToast('No peer paths found for this port', 'info');
+                return;
+            }
+            
+            // Build modal content
+            const modalTitle = document.getElementById('peerPathsModalTitle');
+            const modalBody = document.getElementById('peerPathsModalBody');
+            
+            modalTitle.textContent = `VPN Peer Paths - ${gatewayName} - ${portName}`;
+            
+            const tableHtml = `
+                <div class="table-responsive">
+                    <table class="table table-sm table-dark table-hover">
+                        <thead>
+                            <tr>
+                                <th>Status</th>
+                                <th>VPN Name</th>
+                                <th>Peer Router</th>
+                                <th>Peer Port</th>
+                                <th>Type</th>
+                                <th>Latency (ms)</th>
+                                <th>Loss (%)</th>
+                                <th>Jitter (ms)</th>
+                                <th>MOS</th>
+                                <th>Uptime</th>
+                                <th>MTU</th>
+                                <th>Hops</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${peers.map(peer => {
+                                const uptimeHours = Math.floor(peer.uptime / 3600);
+                                const uptimeDays = Math.floor(uptimeHours / 24);
+                                const uptimeDisplay = uptimeDays > 0 ? `${uptimeDays}d ${uptimeHours % 24}h` : `${uptimeHours}h`;
+                                const statusBadge = peer.up ? '<span class="badge bg-success">Up</span>' : '<span class="badge bg-danger">Down</span>';
+                                const activeBadge = peer.is_active ? '<i class="bi bi-check-circle text-success" title="Active"></i>' : '';
+                                
+                                return `
+                                    <tr>
+                                        <td>${statusBadge} ${activeBadge}</td>
+                                        <td><small>${peer.vpn_name}</small></td>
+                                        <td>${peer.peer_router_name}</td>
+                                        <td>${peer.peer_port_id}</td>
+                                        <td><span class="badge bg-secondary">${peer.type.toUpperCase()}</span></td>
+                                        <td>${peer.latency.toFixed(2)}</td>
+                                        <td>${peer.loss.toFixed(2)}</td>
+                                        <td>${peer.jitter.toFixed(2)}</td>
+                                        <td>${peer.mos.toFixed(1)}</td>
+                                        <td>${uptimeDisplay}</td>
+                                        <td>${peer.mtu}</td>
+                                        <td>${peer.hop_count}</td>
+                                    </tr>
+                                `;
+                            }).join('')}
+                        </tbody>
+                    </table>
+                </div>
+                <div class="mt-3">
+                    <p class="text-muted mb-1"><small><i class="bi bi-info-circle"></i> Peer Path Statistics:</small></p>
+                    <ul class="text-muted" style="font-size: 0.9em;">
+                        <li>Total Paths: ${peers.length}</li>
+                        <li>Up: ${peers.filter(p => p.up).length}</li>
+                        <li>Active: ${peers.filter(p => p.is_active).length}</li>
+                        <li>Average Latency: ${(peers.reduce((sum, p) => sum + p.latency, 0) / peers.length).toFixed(2)} ms</li>
+                        <li>Average MOS: ${(peers.reduce((sum, p) => sum + p.mos, 0) / peers.length).toFixed(1)}</li>
+                    </ul>
+                </div>
+            `;
+            
+            modalBody.innerHTML = tableHtml;
+            
+            // Show modal
+            const modal = new bootstrap.Modal(document.getElementById('peerPathsModal'));
+            modal.show();
         }
     </script>
 </body>
