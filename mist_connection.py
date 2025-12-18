@@ -122,95 +122,155 @@ class MistConnection:
             sites = self.get_sites()
             site_map = {s['id']: s['name'] for s in sites}
             
-            # Use the correct API endpoint for gateway stats
-            response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
+            # Get gateway device stats for basic info
+            device_response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
                 self.apisession,
                 self.org_id,
                 type='gateway'
             )
             
-            if response.status_code == 200:
-                gateways = response.data
-                gateway_stats = []
+            if device_response.status_code != 200:
+                raise Exception(f"API error getting device stats: {device_response.status_code}")
+            
+            gateways = device_response.data
+            
+            # Get WAN port statistics from port search endpoint
+            port_response = mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts(
+                self.apisession,
+                self.org_id,
+                duration='1d',
+                limit=1000
+            )
+            
+            if port_response.status_code != 200:
+                raise Exception(f"API error getting port stats: {port_response.status_code}")
+            
+            # Build a map of device MAC -> WAN ports
+            wan_ports_by_device = {}
+            for port in port_response.data.get('results', []):
+                if port.get('device_type') == 'gateway' and port.get('port_usage') == 'wan':
+                    device_mac = port.get('mac')
+                    if device_mac not in wan_ports_by_device:
+                        wan_ports_by_device[device_mac] = []
+                    wan_ports_by_device[device_mac].append(port)
+            
+            gateway_stats = []
+            
+            for gw in gateways:
+                # Filter by site if specified
+                if site_id and gw.get('site_id') != site_id:
+                    continue
                 
-                for gw in gateways:
-                    # Filter by site if specified
-                    if site_id and gw.get('site_id') != site_id:
-                        continue
-                    
-                    gw_site_id = gw.get('site_id')
-                    gw_id = gw.get('id')
-                    
-                    # Get detailed gateway configuration for port details
-                    port_configs = []
-                    if gw_site_id and gw_id:
-                        try:
-                            config_response = mistapi.api.v1.sites.devices.getSiteDevice(
-                                self.apisession,
-                                gw_site_id,
-                                gw_id
-                            )
-                            if config_response.status_code == 200:
-                                config_data = config_response.data
-                                
-                                # Extract WAN port configurations
-                                if 'port_config' in config_data:
-                                    for port_name, port_cfg in config_data['port_config'].items():
-                                        # Get corresponding stats
-                                        port_stat = {}
-                                        if 'port_stat' in gw and port_name in gw['port_stat']:
-                                            port_stat = gw['port_stat'][port_name]
-                                        
-                                        # Get WAN config if this is a WAN port
+                gw_site_id = gw.get('site_id')
+                gw_id = gw.get('id')
+                gw_mac = gw.get('mac')
+                
+                # Get WAN ports for this gateway
+                wan_ports = wan_ports_by_device.get(gw_mac, [])
+                
+                # Get device configuration for IP details
+                port_configs = []
+                ip_config_by_desc = {}  # Map by description for matching
+                
+                if gw_site_id and gw_id:
+                    try:
+                        config_response = mistapi.api.v1.sites.devices.getSiteDevice(
+                            self.apisession,
+                            gw_site_id,
+                            gw_id
+                        )
+                        if config_response.status_code == 200:
+                            config_data = config_response.data
+                            
+                            # Extract IP configurations from port_config
+                            if 'port_config' in config_data:
+                                for port_name, port_cfg in config_data['port_config'].items():
+                                    if port_cfg.get('usage') == 'wan':
+                                        ip_cfg = port_cfg.get('ip_config', {})
                                         wan_cfg = port_cfg.get('wan_config', {})
-                                        ip_config = port_cfg.get('ip_config', {})
+                                        description = port_cfg.get('description', '').strip()
                                         
-                                        port_configs.append({
-                                            'name': port_name,
-                                            'description': port_cfg.get('description', ''),
-                                            'enabled': not port_cfg.get('disabled', False),
-                                            'usage': port_cfg.get('usage', 'unknown'),
-                                            # IP Configuration
-                                            'ip': ip_config.get('ip', ''),
-                                            'netmask': ip_config.get('netmask', ''),
-                                            'gateway': ip_config.get('gateway', ''),
-                                            'type': ip_config.get('type', 'dhcp'),
-                                            # WAN Configuration  
-                                            'wan_type': wan_cfg.get('type', ''),
-                                            'wan_source_nat': wan_cfg.get('nat_mode', ''),
-                                            'override': 'yes' if port_cfg.get('override', False) else 'no',
-                                            # Statistics
-                                            'up': port_stat.get('up', False),
-                                            'rx_bytes': port_stat.get('rx_bytes', 0),
-                                            'tx_bytes': port_stat.get('tx_bytes', 0),
-                                            'rx_pkts': port_stat.get('rx_pkts', 0),
-                                            'tx_pkts': port_stat.get('tx_pkts', 0),
-                                            'rx_errors': port_stat.get('rx_errors', 0),
-                                            'tx_errors': port_stat.get('tx_errors', 0),
-                                            'speed': port_stat.get('speed', 0),
-                                            'mac': port_stat.get('mac', '')
-                                        })
-                        except Exception as e:
-                            logger.warning(f"Could not fetch config for gateway {gw_id}: {str(e)}")
+                                        # Store IP config by description for matching with runtime ports
+                                        if description:
+                                            ip_config_by_desc[description] = {
+                                                'description': description,
+                                                'ip': ip_cfg.get('ip', ''),
+                                                'netmask': ip_cfg.get('netmask', ''),
+                                                'gateway': ip_cfg.get('gateway', ''),
+                                                'type': ip_cfg.get('type', 'dhcp'),
+                                                'override': 'yes' if port_cfg.get('override', False) else 'no',
+                                                'disabled': port_cfg.get('disabled', False)
+                                            }
+                    except Exception as e:
+                        logger.warning(f"Could not fetch config for gateway {gw_id}: {str(e)}")
+                
+                # Combine WAN port stats with IP configuration
+                for port in wan_ports:
+                    port_id = port.get('port_id')
+                    port_desc = port.get('port_desc', '').strip()
                     
-                    gateway_stats.append({
-                        'id': gw_id,
-                        'name': gw.get('name', 'Unknown'),
-                        'site_id': gw_site_id,
-                        'site_name': site_map.get(gw_site_id, gw.get('site_name', '')),
-                        'model': gw.get('model', ''),
-                        'version': gw.get('version', ''),
-                        'status': gw.get('status', 'unknown'),
-                        'uptime': gw.get('uptime', 0),
-                        'ip': gw.get('ip', ''),
-                        'mac': gw.get('mac', ''),
-                        'ports': port_configs,
-                        'num_ports': len(port_configs)
+                    # Match by description to get IP configuration
+                    ip_config = ip_config_by_desc.get(port_desc, {})
+                    
+                    # If no match found in config, use empty values
+                    if not ip_config:
+                        ip_config = {
+                            'description': port_desc,
+                            'ip': '',
+                            'netmask': '',
+                            'gateway': '',
+                            'type': 'unknown',
+                            'override': 'no',
+                            'disabled': False
+                        }
+                    
+                    # Clean up IP and netmask formatting
+                    ip_addr = ip_config.get('ip', '').strip()
+                    netmask = ip_config.get('netmask', '').strip()
+                    
+                    # Remove leading slash from netmask if present (CIDR notation)
+                    if netmask.startswith('/'):
+                        netmask = netmask[1:]
+                    
+                    port_configs.append({
+                        'name': port_id,
+                        'description': ip_config.get('description', port.get('port_desc', '')),
+                        'enabled': port.get('up', False) and not ip_config.get('disabled', False),
+                        'usage': 'wan',
+                        # IP Configuration from device config
+                        'ip': ip_addr,
+                        'netmask': netmask,
+                        'gateway': ip_config.get('gateway', ''),
+                        'type': ip_config.get('type', 'unknown'),
+                        'override': ip_config.get('override', 'no'),
+                        # Statistics from port search
+                        'up': port.get('up', False),
+                        'rx_bytes': port.get('rx_bytes', 0),
+                        'tx_bytes': port.get('tx_bytes', 0),
+                        'rx_pkts': port.get('rx_pkts', 0),
+                        'tx_pkts': port.get('tx_pkts', 0),
+                        'rx_errors': port.get('rx_errors', 0),
+                        'tx_errors': port.get('tx_errors', 0),
+                        'speed': port.get('speed', 0),
+                        'mac': port.get('port_mac', '')
                     })
                 
-                return gateway_stats
-            else:
-                raise Exception(f"API error: {response.status_code}")
+                gateway_stats.append({
+                    'id': gw_id,
+                    'name': gw.get('name', 'Unknown'),
+                    'site_id': gw_site_id,
+                    'site_name': site_map.get(gw_site_id, gw.get('site_name', '')),
+                    'model': gw.get('model', ''),
+                    'version': gw.get('version', ''),
+                    'status': gw.get('status', 'unknown'),
+                    'uptime': gw.get('uptime', 0),
+                    'ip': gw.get('ip', ''),
+                    'mac': gw_mac,
+                    'ports': port_configs,
+                    'num_ports': len(port_configs)
+                })
+            
+            return gateway_stats
         except Exception as e:
             logger.error(f"Error getting gateway stats: {str(e)}")
             raise
