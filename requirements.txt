@@ -1,0 +1,4 @@
+Flask==3.0.0
+mistapi==0.44.3
+gunicorn==21.2.0
+python-dotenv>=0.15.0,<0.17

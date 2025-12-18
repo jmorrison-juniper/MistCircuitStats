@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mist Circuit Stats</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+    <style>
+        :root {
+            --tmobile-magenta: #E20074;
+            --tmobile-magenta-hover: #C00062;
+        }
+        
+        body {
+            background-color: #1a1a1a;
+            color: #e0e0e0;
+        }
+        
+        .navbar {
+            background-color: #2d2d2d !important;
+            border-bottom: 3px solid var(--tmobile-magenta);
+        }
+        
+        .btn-primary {
+            background-color: var(--tmobile-magenta);
+            border-color: var(--tmobile-magenta);
+        }
+        
+        .btn-primary:hover {
+            background-color: var(--tmobile-magenta-hover);
+            border-color: var(--tmobile-magenta-hover);
+        }
+        
+        .card {
+            background-color: #2d2d2d;
+            border: 1px solid #404040;
+            margin-bottom: 1rem;
+        }
+        
+        .card-header {
+            background-color: #363636;
+            border-bottom: 2px solid var(--tmobile-magenta);
+            font-weight: 600;
+        }
+        
+        .table {
+            color: #e0e0e0;
+        }
+        
+        .table-hover tbody tr:hover {
+            background-color: #363636;
+        }
+        
+        .badge {
+            font-size: 0.85rem;
+            padding: 0.35em 0.65em;
+        }
+        
+        .badge.status-connected {
+            background-color: #28a745;
+        }
+        
+        .badge.status-disconnected {
+            background-color: #dc3545;
+        }
+        
+        .port-up {
+            color: #28a745;
+        }
+        
+        .port-down {
+            color: #dc3545;
+        }
+        
+        .stats-card {
+            text-align: center;
+            padding: 1rem;
+        }
+        
+        .stats-value {
+            font-size: 2rem;
+            font-weight: bold;
+            color: var(--tmobile-magenta);
+        }
+        
+        .stats-label {
+            font-size: 0.9rem;
+            color: #a0a0a0;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 3rem;
+        }
+        
+        .spinner-border {
+            color: var(--tmobile-magenta);
+        }
+        
+        /* iPad landscape optimization */
+        @media (min-width: 1024px) and (orientation: landscape) {
+            .gateway-grid {
+                display: grid;
+                grid-template-columns: repeat(3, 1fr);
+                gap: 1rem;
+            }
+        }
+        
+        .toast-container {
+            position: fixed;
+            top: 70px;
+            right: 20px;
+            z-index: 1050;
+        }
+        
+        .search-box {
+            max-width: 400px;
+            margin-bottom: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar navbar-dark navbar-expand-lg">
+        <div class="container-fluid">
+            <span class="navbar-brand mb-0 h1">
+                <i class="bi bi-router"></i> Mist Circuit Stats
+            </span>
+            <div class="d-flex align-items-center">
+                <span class="badge bg-secondary me-2" id="orgBadge">Loading...</span>
+                <button class="btn btn-sm btn-outline-light" onclick="refreshData()">
+                    <i class="bi bi-arrow-clockwise"></i> Refresh
+                </button>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <div class="container-fluid mt-4">
+        <!-- Summary Stats -->
+        <div class="row mb-4">
+            <div class="col-md-3">
+                <div class="card stats-card">
+                    <div class="stats-value" id="totalGateways">-</div>
+                    <div class="stats-label">Total Gateways</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card stats-card">
+                    <div class="stats-value" id="connectedGateways">-</div>
+                    <div class="stats-label">Connected</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card stats-card">
+                    <div class="stats-value" id="totalPorts">-</div>
+                    <div class="stats-label">Total WAN Ports</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card stats-card">
+                    <div class="stats-value" id="activePorts">-</div>
+                    <div class="stats-label">Active Ports</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Search and Filters -->
+        <div class="row mb-3">
+            <div class="col-md-6">
+                <input type="text" class="form-control search-box" id="searchInput" placeholder="Search gateways by name or site...">
+            </div>
+            <div class="col-md-6 text-end">
+                <select class="form-select d-inline-block w-auto" id="siteFilter">
+                    <option value="">All Sites</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Loading State -->
+        <div id="loadingState" class="loading">
+            <div class="spinner-border" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            <p class="mt-3">Loading gateway statistics...</p>
+        </div>
+
+        <!-- Gateway Cards -->
+        <div id="gatewayContainer" class="gateway-grid" style="display: none;">
+            <!-- Gateway cards will be inserted here -->
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div class="toast-container">
+        <div id="toastNotification" class="toast" role="alert">
+            <div class="toast-header">
+                <i class="bi bi-info-circle me-2"></i>
+                <strong class="me-auto">Notification</strong>
+                <button type="button" class="btn-close" data-bs-dismiss="toast"></button>
+            </div>
+            <div class="toast-body" id="toastBody">
+                Message here
+            </div>
+        </div>
+    </div>
+
+    <!-- Gateway Detail Modal -->
+    <div class="modal fade" id="gatewayModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="modalTitle">Gateway Details</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="modalBody">
+                    <!-- Details will be loaded here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        let allGateways = [];
+        let allSites = [];
+        
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            loadData();
+            
+            // Setup search
+            document.getElementById('searchInput').addEventListener('input', filterGateways);
+            document.getElementById('siteFilter').addEventListener('change', filterGateways);
+        });
+        
+        async function loadData() {
+            try {
+                // Load sites for filter
+                const sitesResponse = await fetch('/api/sites');
+                const sitesData = await sitesResponse.json();
+                if (sitesData.success) {
+                    allSites = sitesData.data;
+                    populateSiteFilter();
+                }
+                
+                // Load gateways
+                const gatewaysResponse = await fetch('/api/gateways');
+                const gatewaysData = await gatewaysResponse.json();
+                
+                if (gatewaysData.success) {
+                    allGateways = gatewaysData.data;
+                    updateStats();
+                    renderGateways(allGateways);
+                    document.getElementById('loadingState').style.display = 'none';
+                    document.getElementById('gatewayContainer').style.display = 'block';
+                } else {
+                    showToast('Error loading data: ' + gatewaysData.error, 'danger');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                showToast('Error loading data: ' + error.message, 'danger');
+            }
+        }
+        
+        function populateSiteFilter() {
+            const select = document.getElementById('siteFilter');
+            allSites.forEach(site => {
+                const option = document.createElement('option');
+                option.value = site.id;
+                option.textContent = site.name;
+                select.appendChild(option);
+            });
+        }
+        
+        function updateStats() {
+            const connected = allGateways.filter(gw => gw.status === 'connected').length;
+            const totalPorts = allGateways.reduce((sum, gw) => sum + gw.num_ports, 0);
+            const activePorts = allGateways.reduce((sum, gw) => 
+                sum + gw.ports.filter(p => p.up).length, 0);
+            
+            document.getElementById('totalGateways').textContent = allGateways.length;
+            document.getElementById('connectedGateways').textContent = connected;
+            document.getElementById('totalPorts').textContent = totalPorts;
+            document.getElementById('activePorts').textContent = activePorts;
+            
+            if (allGateways.length > 0) {
+                document.getElementById('orgBadge').textContent = allGateways[0].site_name || 'Organization';
+            }
+        }
+        
+        function filterGateways() {
+            const searchTerm = document.getElementById('searchInput').value.toLowerCase();
+            const siteId = document.getElementById('siteFilter').value;
+            
+            const filtered = allGateways.filter(gw => {
+                const matchesSearch = gw.name.toLowerCase().includes(searchTerm) || 
+                                     gw.site_name.toLowerCase().includes(searchTerm);
+                const matchesSite = !siteId || gw.site_id === siteId;
+                return matchesSearch && matchesSite;
+            });
+            
+            renderGateways(filtered);
+        }
+        
+        function renderGateways(gateways) {
+            const container = document.getElementById('gatewayContainer');
+            container.innerHTML = '';
+            
+            if (gateways.length === 0) {
+                container.innerHTML = '<div class="col-12"><p class="text-center text-muted">No gateways found</p></div>';
+                return;
+            }
+            
+            gateways.forEach(gateway => {
+                const card = createGatewayCard(gateway);
+                container.appendChild(card);
+            });
+        }
+        
+        function createGatewayCard(gateway) {
+            const card = document.createElement('div');
+            card.className = 'card';
+            
+            const statusClass = gateway.status === 'connected' ? 'status-connected' : 'status-disconnected';
+            const uptimeHours = Math.floor(gateway.uptime / 3600);
+            
+            card.innerHTML = `
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span><i class="bi bi-router"></i> ${gateway.name}</span>
+                    <span class="badge ${statusClass}">${gateway.status}</span>
+                </div>
+                <div class="card-body">
+                    <p class="mb-2"><strong>Site:</strong> ${gateway.site_name}</p>
+                    <p class="mb-2"><strong>Model:</strong> ${gateway.model}</p>
+                    <p class="mb-2"><strong>Uptime:</strong> ${uptimeHours}h</p>
+                    <p class="mb-3"><strong>IP:</strong> ${gateway.ip || 'N/A'}</p>
+                    
+                    <h6 class="mb-2">WAN Ports (${gateway.ports.length})</h6>
+                    <div class="table-responsive">
+                        <table class="table table-sm">
+                            <thead>
+                                <tr>
+                                    <th>Port</th>
+                                    <th>Status</th>
+                                    <th>RX</th>
+                                    <th>TX</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${gateway.ports.map(port => `
+                                    <tr>
+                                        <td>${port.name}</td>
+                                        <td><i class="bi bi-circle-fill ${port.up ? 'port-up' : 'port-down'}"></i></td>
+                                        <td>${formatBytes(port.rx_bytes)}</td>
+                                        <td>${formatBytes(port.tx_bytes)}</td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                    
+                    <button class="btn btn-sm btn-primary w-100 mt-2" onclick="showGatewayDetails('${gateway.id}')">
+                        <i class="bi bi-info-circle"></i> View Details
+                    </button>
+                </div>
+            `;
+            
+            return card;
+        }
+        
+        async function showGatewayDetails(gatewayId) {
+            const modal = new bootstrap.Modal(document.getElementById('gatewayModal'));
+            const gateway = allGateways.find(gw => gw.id === gatewayId);
+            
+            document.getElementById('modalTitle').textContent = gateway.name + ' - Detailed Stats';
+            document.getElementById('modalBody').innerHTML = '<div class="text-center"><div class="spinner-border"></div></div>';
+            
+            modal.show();
+            
+            try {
+                const response = await fetch(`/api/gateway/${gatewayId}/ports`);
+                const data = await response.json();
+                
+                if (data.success) {
+                    renderGatewayDetails(data.data);
+                } else {
+                    document.getElementById('modalBody').innerHTML = `<div class="alert alert-danger">Error: ${data.error}</div>`;
+                }
+            } catch (error) {
+                document.getElementById('modalBody').innerHTML = `<div class="alert alert-danger">Error: ${error.message}</div>`;
+            }
+        }
+        
+        function renderGatewayDetails(data) {
+            const ports = Object.entries(data.ports);
+            
+            const html = `
+                <div class="table-responsive">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Port</th>
+                                <th>Status</th>
+                                <th>Speed</th>
+                                <th>RX Bytes</th>
+                                <th>TX Bytes</th>
+                                <th>RX Packets</th>
+                                <th>TX Packets</th>
+                                <th>Errors</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${ports.map(([name, port]) => `
+                                <tr>
+                                    <td><strong>${name}</strong></td>
+                                    <td><i class="bi bi-circle-fill ${port.up ? 'port-up' : 'port-down'}"></i> ${port.up ? 'Up' : 'Down'}</td>
+                                    <td>${port.speed} Mbps</td>
+                                    <td>${formatBytes(port.rx_bytes)}</td>
+                                    <td>${formatBytes(port.tx_bytes)}</td>
+                                    <td>${port.rx_pkts.toLocaleString()}</td>
+                                    <td>${port.tx_pkts.toLocaleString()}</td>
+                                    <td>${port.rx_errors + port.tx_errors}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+            
+            document.getElementById('modalBody').innerHTML = html;
+        }
+        
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+        
+        function refreshData() {
+            document.getElementById('loadingState').style.display = 'block';
+            document.getElementById('gatewayContainer').style.display = 'none';
+            loadData();
+            showToast('Data refreshed successfully', 'success');
+        }
+        
+        function showToast(message, type = 'info') {
+            const toastEl = document.getElementById('toastNotification');
+            const toastBody = document.getElementById('toastBody');
+            
+            toastBody.textContent = message;
+            toastEl.classList.remove('bg-success', 'bg-danger', 'bg-info');
+            toastEl.classList.add('bg-' + type);
+            
+            const toast = new bootstrap.Toast(toastEl);
+            toast.show();
+        }
+    </script>
+</body>
+</html>

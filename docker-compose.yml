@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  mistcircuitstats:
+    image: ghcr.io/jmorrison-juniper/mistcircuitstats:latest
+    container_name: mistcircuitstats
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      - MIST_APITOKEN=${MIST_APITOKEN}
+      - MIST_ORG_ID=${MIST_ORG_ID:-}
+      - MIST_HOST=${MIST_HOST:-api.mist.com}
+      - PORT=5000
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
