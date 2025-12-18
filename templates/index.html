@@ -1083,7 +1083,19 @@
                 
                 if (!cell) return;
                 
-                const peers = peersByPort[port.name] || [];
+                // Try exact match first, then try to find peers for this port (with or without VLAN tag)
+                let peers = peersByPort[port.name] || [];
+                
+                // If no exact match, look for peers that start with this port name (e.g., ge-0/0/0.20 starts with ge-0/0/0)
+                if (peers.length === 0) {
+                    peers = [];
+                    for (const [portId, portPeers] of Object.entries(peersByPort)) {
+                        // Check if this peer's port_id starts with our port name (base interface match)
+                        if (portId.startsWith(port.name + '.') || portId === port.name) {
+                            peers.push(...portPeers);
+                        }
+                    }
+                }
                 
                 if (peers.length === 0) {
                     cell.innerHTML = '<span class="text-muted">-</span>';
@@ -1117,7 +1129,17 @@
                 return;
             }
             
-            const peers = peersByPort[portName] || [];
+            // Try exact match first, then look for peers with VLAN tags on this base interface
+            let peers = peersByPort[portName] || [];
+            
+            if (peers.length === 0) {
+                peers = [];
+                for (const [portId, portPeers] of Object.entries(peersByPort)) {
+                    if (portId.startsWith(portName + '.') || portId === portName) {
+                        peers.push(...portPeers);
+                    }
+                }
+            }
             
             if (peers.length === 0) {
                 showToast('No peer paths found for this port', 'info');
