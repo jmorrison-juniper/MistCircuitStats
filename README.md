@@ -8,13 +8,15 @@ A Flask web application that displays Gateway WAN port statistics from all gatew
 
 ## Features
 
-- 📊 Real-time gateway WAN port statistics with windowed time ranges
+- 📊 Real-time gateway WAN port statistics with 7-day history
 - 📈 Interactive time-series charts (click any RX/TX cell to view)
-- ⏱️ Multiple timeframe options: 1 hour, 24 hours, 7 days
+- ⏱️ In-chart timeframe filtering: 1 hour, 6 hours, 24 hours, 7 days
+- 📐 Dynamic resolution: optimal data granularity per view (5min → 1hr intervals)
 - 🌐 Organization-wide gateway overview
 - 📱 Responsive dark theme UI with T-Mobile magenta accents
 - 🔍 Search and filter by site or gateway name
 - 🎯 Per-port detailed statistics and configuration
+- 📥 CSV export with peer path counts
 - 🐳 Multi-architecture Docker support (amd64/arm64)
 
 ## Quick Start
