@@ -357,7 +357,7 @@
                             <th>Router Hostname</th>
                             <th>Model</th>
                             <th>Status</th>
-                            <th>IP Address</th>
+                            <th>External IP</th>
                             <th>Ports</th>
                             <th>Uptime</th>
                         </tr>
@@ -583,7 +583,7 @@
                                 <th>Enablement</th>
                                 <th>Physical Status</th>
                                 <th>Gateway IP</th>
-                                <th>IP Address</th>
+                                <th>WAN IP</th>
                                 <th>CIDR</th>
                                 <th>Config Type</th>
                                 <th>Override</th>
@@ -660,9 +660,9 @@
             
             // Build CSV content - matching table columns exactly
             const headers = [
-                'Site Name', 'Router Hostname', 'Model', 'Status', 'IP Address', 'Uptime',
+                'Site Name', 'Router Hostname', 'Model', 'Status', 'External IP', 'Uptime',
                 'Port Name', 'Description', 'Enablement', 'Physical Status', 
-                'Gateway IP', 'IP Address', 'CIDR', 'Config Type', 'Override', 
+                'Gateway IP', 'WAN IP', 'CIDR', 'Config Type', 'Override', 
                 'RX Data (Bytes)', 'TX Data (Bytes)'
             ];
             const rows = [headers];
