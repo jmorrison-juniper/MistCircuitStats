@@ -118,7 +118,7 @@ class MistConnection:
             if not self.org_id:
                 raise ValueError("Organization ID is required")
             # Use the correct API endpoint for gateway stats
-            response = mistapi.api.v1.orgs.stats.listOrgStats(
+            response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
                 self.apisession,
                 self.org_id,
                 type='gateway'
