@@ -3,6 +3,7 @@ Mist API Connection Wrapper
 Handles all interactions with the Juniper Mist API using mistapi SDK
 """
 import logging
+import time
 from typing import List, Dict, Optional
 import mistapi
 
@@ -11,6 +12,16 @@ logger = logging.getLogger(__name__)
 
 class MistConnection:
     """Wrapper class for Mist API operations"""
+    
+    # Class-level caches to reduce API calls across requests
+    _sites_cache: Optional[List[Dict]] = None
+    _sites_cache_time: float = 0
+    _device_profile_cache: Dict[str, Dict] = {}
+    _gateway_template_cache: Dict[str, Dict] = {}
+    
+    # Cache TTLs (in seconds)
+    SITES_CACHE_TTL = 300  # 5 minutes
+    PROFILE_CACHE_TTL = 600  # 10 minutes
     
     def __init__(self, api_token: str, org_id: Optional[str] = None, host: str = 'api.mist.com'):
         """
@@ -101,101 +112,168 @@ class MistConnection:
             raise
     
     def get_sites(self) -> List[Dict]:
-        """Get list of sites in the organization"""
+        """Get list of sites in the organization (cached with pagination)"""
         try:
             if not self.org_id:
                 raise ValueError("Organization ID is required")
+            
+            # Check class-level cache
+            current_time = time.time()
+            if (MistConnection._sites_cache is not None and 
+                current_time - MistConnection._sites_cache_time < self.SITES_CACHE_TTL):
+                logger.debug("Using cached sites data")
+                return MistConnection._sites_cache
+            
+            # Fetch all sites with pagination (limit=1000 should cover most orgs)
             response = mistapi.api.v1.orgs.sites.listOrgSites(
                 self.apisession,
-                self.org_id
+                self.org_id,
+                limit=1000
             )
             if response.status_code == 200:
                 sites = response.data
-                return [{
+                result = [{
                     'id': site.get('id'),
                     'name': site.get('name'),
                     'address': site.get('address', ''),
                     'timezone': site.get('timezone', 'UTC'),
                     'num_devices': site.get('num_devices', 0)
                 } for site in sites]
+                
+                # Update cache
+                MistConnection._sites_cache = result
+                MistConnection._sites_cache_time = current_time
+                logger.debug(f"Cached {len(result)} sites")
+                
+                return result
             else:
                 raise Exception(f"API error: {response.status_code}")
         except Exception as e:
             logger.error(f"Error getting sites: {str(e)}")
             raise
-    
-    def _get_port_windowed_traffic(self, gw_site_id: str, device_id: str, port_id: str, start: int, end: int) -> Dict:
+
+    def _batch_fetch_inventory(self, gateway_macs: set) -> Dict[str, Dict]:
         """
-        Get port-specific windowed traffic statistics from gateway insights API
+        Batch fetch device inventory data (device profile IDs, site IDs) using org-level inventory.
+        This provides profile/template IDs without per-device API calls.
         
         Args:
-            gw_site_id: Site ID
-            device_id: Gateway device ID (UUID format)
-            port_id: Port ID (e.g., 'ge-0/0/1')
-            start: Start time as Unix epoch timestamp
-            end: End time as Unix epoch timestamp
+            gateway_macs: Set of gateway MAC addresses
             
         Returns:
-            Dictionary with rx_bytes and tx_bytes for the time window
+            Dictionary keyed by MAC with inventory data (deviceprofile_id, site_id, etc.)
         """
-        import requests
-        
-        # Calculate appropriate interval based on time window
-        duration = end - start
-        if duration <= 15 * 60:  # 15 minutes
-            interval = 60  # 1 minute
-        elif duration <= 60 * 60:  # 1 hour
-            interval = 300  # 5 minutes
-        elif duration <= 24 * 60 * 60:  # 1 day
-            interval = 600  # 10 minutes
-        else:  # 7 days or more
-            interval = 3600  # 1 hour
-        
-        result = {'rx_bytes': 0, 'tx_bytes': 0}
+        inventory_data = {}
         
         try:
-            headers = {
-                'Authorization': f'Token {self.api_token}',
-                'Content-Type': 'application/json'
-            }
-            
-            url = f'https://{self.host}/api/v1/sites/{gw_site_id}/insights/gateway/{device_id}/stats'
-            params = {
-                'interval': interval,
-                'start': start,
-                'end': end,
-                'port_id': port_id,
-                'metrics': 'rx_bps,tx_bps'
-            }
-            
-            response = requests.get(url, headers=headers, params=params)
+            # Use org-level inventory to get device profile IDs for all gateways (1 API call)
+            response = mistapi.api.v1.orgs.inventory.getOrgInventory(
+                self.apisession,
+                self.org_id,
+                type='gateway'
+            )
             
             if response.status_code == 200:
-                data = response.json()
+                results = response.data
                 
-                # Calculate total bytes from time-series data
-                rx_bps_values = data.get('rx_bps', [])
-                tx_bps_values = data.get('tx_bps', [])
+                for device in results:
+                    mac = device.get('mac', '')
+                    if mac not in gateway_macs:
+                        continue
+                    
+                    # Extract inventory data
+                    inventory_data[mac] = {
+                        'device_id': device.get('id'),
+                        'site_id': device.get('site_id'),
+                        'deviceprofile_id': device.get('deviceprofile_id'),
+                        'name': device.get('name', '')
+                    }
                 
-                # Sum up bytes for each interval (bps * interval_seconds / 8 bits per byte)
-                for rx_bps in rx_bps_values:
-                    if rx_bps is not None and rx_bps > 0:
-                        result['rx_bytes'] += int((rx_bps * interval) / 8)
-                
-                for tx_bps in tx_bps_values:
-                    if tx_bps is not None and tx_bps > 0:
-                        result['tx_bytes'] += int((tx_bps * interval) / 8)
+                logger.debug(f"Batch fetched inventory for {len(inventory_data)} gateways")
             else:
-                logger.warning(f"Insights API error {response.status_code} for port {port_id}")
-        
+                logger.warning(f"Org inventory returned {response.status_code}")
+                
         except Exception as e:
-            logger.warning(f"Error fetching insights data for port {port_id}: {str(e)}")
+            logger.warning(f"Error in batch inventory fetch: {str(e)}")
         
-        return result
-    
+        return inventory_data
+
+    def _get_device_profile(self, deviceprofile_id: str) -> Dict:
+        """
+        Get device profile configuration (for Hub devices), using class-level cache
+        
+        Args:
+            deviceprofile_id: Device profile ID
+            
+        Returns:
+            Device profile data dictionary
+        """
+        cache_key = f"profile:{deviceprofile_id}"
+        if cache_key in MistConnection._device_profile_cache:
+            logger.debug(f"Using cached device profile {deviceprofile_id}")
+            return MistConnection._device_profile_cache[cache_key]
+        
+        try:
+            response = mistapi.api.v1.orgs.deviceprofiles.getOrgDeviceProfile(
+                self.apisession,
+                self.org_id,
+                deviceprofile_id
+            )
+            if response.status_code == 200:
+                MistConnection._device_profile_cache[cache_key] = response.data
+                logger.debug(f"Fetched and cached device profile {deviceprofile_id}: {response.data.get('name', 'unknown')}")
+                return response.data
+            else:
+                logger.warning(f"Could not fetch device profile {deviceprofile_id}: {response.status_code}")
+        except Exception as e:
+            logger.warning(f"Error fetching device profile {deviceprofile_id}: {str(e)}")
+        
+        MistConnection._device_profile_cache[cache_key] = {}
+        return {}
+
+    def _get_gateway_template(self, gatewaytemplate_id: str) -> Dict:
+        """
+        Get gateway template configuration (for Spoke/Branch devices), using class-level cache
+        
+        Args:
+            gatewaytemplate_id: Gateway template ID
+            
+        Returns:
+            Gateway template data dictionary
+        """
+        cache_key = f"template:{gatewaytemplate_id}"
+        if cache_key in MistConnection._gateway_template_cache:
+            logger.debug(f"Using cached gateway template {gatewaytemplate_id}")
+            return MistConnection._gateway_template_cache[cache_key]
+        
+        try:
+            response = mistapi.api.v1.orgs.gatewaytemplates.getOrgGatewayTemplate(
+                self.apisession,
+                self.org_id,
+                gatewaytemplate_id
+            )
+            if response.status_code == 200:
+                MistConnection._gateway_template_cache[cache_key] = response.data
+                logger.debug(f"Fetched and cached gateway template {gatewaytemplate_id}: {response.data.get('name', 'unknown')}")
+                return response.data
+            else:
+                logger.warning(f"Could not fetch gateway template {gatewaytemplate_id}: {response.status_code}")
+        except Exception as e:
+            logger.warning(f"Error fetching gateway template {gatewaytemplate_id}: {str(e)}")
+        
+        MistConnection._gateway_template_cache[cache_key] = {}
+        return {}
+
     def get_gateway_stats(self, site_id: Optional[str] = None, start: Optional[int] = None, end: Optional[int] = None) -> List[Dict]:
         """
         Get gateway statistics including WAN port information
+        
+        API call optimization strategy:
+        1. Sites: Cached at class level (1 call per 5 min)
+        2. Device stats: Single org-level call
+        3. Port stats: Single org-level call (includes traffic data)
+        4. Device configs: Batch fetch using org-level inventory search
+        5. Profiles/Templates: Cached at class level (1 call per unique profile)
         
         Args:
             site_id: Optional site ID to filter gateways
@@ -209,11 +287,11 @@ class MistConnection:
             if not self.org_id:
                 raise ValueError("Organization ID is required")
             
-            # Get site names mapping
+            # Get site names mapping (cached)
             sites = self.get_sites()
             site_map = {s['id']: s['name'] for s in sites}
             
-            # Get gateway device stats for basic info
+            # Get gateway device stats for basic info (1 API call)
             device_response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
                 self.apisession,
                 self.org_id,
@@ -225,38 +303,48 @@ class MistConnection:
             
             gateways = device_response.data
             
-            # Build a map of site_id -> site gateways for efficient port queries
-            gateways_by_site = {}
-            for gw in gateways:
-                gw_site_id = gw.get('site_id')
-                if gw_site_id:
-                    if gw_site_id not in gateways_by_site:
-                        gateways_by_site[gw_site_id] = []
-                    gateways_by_site[gw_site_id].append(gw)
-            
-            # Get WAN port statistics per site using site-level endpoint
+            # Get ALL port statistics using org-level endpoint
+            # This returns physical port status for all gateways
             wan_ports_by_device = {}
-            for site_id_key, site_gateways in gateways_by_site.items():
-                # Build API parameters
-                params = {}
-                if start is not None:
-                    params['start'] = start
-                if end is not None:
-                    params['end'] = end
-                
-                port_response = mistapi.api.v1.sites.stats.searchSiteSwOrGwPorts(
-                    self.apisession,
-                    site_id_key,
-                    **params
-                )
-                
-                if port_response.status_code == 200:
-                    for port in port_response.data.get('results', []):
-                        if port.get('device_type') == 'gateway' and port.get('port_usage') == 'wan':
-                            device_mac = port.get('mac')
-                            if device_mac not in wan_ports_by_device:
-                                wan_ports_by_device[device_mac] = []
-                            wan_ports_by_device[device_mac].append(port)
+            all_ports_by_device = {}  # Track all ports for physical status
+            
+            # Build a set of gateway MACs for filtering port results
+            gateway_macs = {gw.get('mac') for gw in gateways if gw.get('mac')}
+            
+            port_params = {}
+            if start is not None:
+                port_params['start'] = start
+            if end is not None:
+                port_params['end'] = end
+            
+            port_response = mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts(
+                self.apisession,
+                self.org_id,
+                **port_params
+            )
+            
+            if port_response.status_code == 200:
+                for port in port_response.data.get('results', []):
+                    device_mac = port.get('mac')
+                    port_id = port.get('port_id', '')
+                    
+                    # Only process ports belonging to gateways we care about
+                    if device_mac not in gateway_macs:
+                        continue
+                    
+                    # Store all ports for physical status lookup
+                    if device_mac not in all_ports_by_device:
+                        all_ports_by_device[device_mac] = {}
+                    all_ports_by_device[device_mac][port_id] = port
+                    
+                    # Also track WAN ports separately
+                    if port.get('port_usage') == 'wan':
+                        if device_mac not in wan_ports_by_device:
+                            wan_ports_by_device[device_mac] = []
+                        wan_ports_by_device[device_mac].append(port)
+            
+            # Batch fetch inventory data for profile IDs (1 API call)
+            inventory_map = self._batch_fetch_inventory(gateway_macs)
             
             gateway_stats = []
             
@@ -269,56 +357,91 @@ class MistConnection:
                 gw_id = gw.get('id')
                 gw_mac = gw.get('mac')
                 
-                # Get site name - fallback to API call if not in map (pagination issue)
+                # Get site name - fallback is unlikely with proper caching
                 gw_site_name = site_map.get(gw_site_id, '')
                 if not gw_site_name and gw_site_id:
-                    try:
-                        site_response = mistapi.api.v1.sites.sites.getSiteInfo(self.apisession, gw_site_id)
-                        if site_response.status_code == 200:
-                            gw_site_name = site_response.data.get('name', '')
-                    except Exception as e:
-                        logger.warning(f"Could not fetch site name for {gw_site_id}: {str(e)}")
+                    # Only log warning, don't make extra API call
+                    logger.warning(f"Site {gw_site_id} not found in cached site map")
                 
                 # Get WAN ports for this gateway
                 wan_ports = wan_ports_by_device.get(gw_mac, [])
                 
-                # Get device configuration for IP details AND actual DHCP IPs
+                # Get all port physical status for this gateway (from org-level port stats)
+                device_port_stats = all_ports_by_device.get(gw_mac, {})
+                
+                # Get device configuration
                 port_configs = []
-                ip_config_by_desc = {}  # Map by description for matching
+                wan_port_config_by_name = {}  # Map by port name (e.g., 'ge-0/0/1.30') for matching
                 runtime_ips_by_port = {}  # Map of port_id -> actual runtime IP/netmask from if_stat
                 
-                if gw_site_id and gw_id:
-                    try:
-                        # Get device configuration for static IP configs
+                # Get profile ID from batch inventory
+                inventory_data = inventory_map.get(gw_mac, {})
+                deviceprofile_id = inventory_data.get('deviceprofile_id')
+                
+                try:
+                    # Get device configuration for port_config and gatewaytemplate_id
+                    # This is needed per-device but profile fetches are cached
+                    device_config = {}
+                    gatewaytemplate_id = None
+                    if gw_site_id and gw_id:
                         config_response = mistapi.api.v1.sites.devices.getSiteDevice(
                             self.apisession,
                             gw_site_id,
                             gw_id
                         )
                         if config_response.status_code == 200:
-                            config_data = config_response.data
+                            device_config = config_response.data
+                            # Use device config's gatewaytemplate_id if not a Hub device
+                            if not deviceprofile_id:
+                                gatewaytemplate_id = device_config.get('gatewaytemplate_id')
+                    
+                    # Start with device profile OR gateway template port_config
+                    # Hub devices use deviceprofile_id, Branch/Spoke devices use gatewaytemplate_id
+                    merged_port_config = {}
+                    if deviceprofile_id:
+                        # Hub device - get config from device profile (class-level cache)
+                        profile_data = self._get_device_profile(deviceprofile_id)
+                        if profile_data and 'port_config' in profile_data:
+                            merged_port_config = dict(profile_data.get('port_config', {}))
+                            logger.debug(f"Gateway {gw_id} (Hub) using device profile {deviceprofile_id} with {len(merged_port_config)} ports")
+                    elif gatewaytemplate_id:
+                        # Branch/Spoke device - get config from gateway template (class-level cache)
+                        template_data = self._get_gateway_template(gatewaytemplate_id)
+                        if template_data and 'port_config' in template_data:
+                            merged_port_config = dict(template_data.get('port_config', {}))
+                            logger.debug(f"Gateway {gw_id} (Branch) using gateway template {gatewaytemplate_id} with {len(merged_port_config)} ports")
+                    
+                    # Merge device-level port_config (overrides profile settings)
+                    device_port_config = device_config.get('port_config', {})
+                    if device_port_config:
+                        for port_name, port_cfg in device_port_config.items():
+                            if port_name in merged_port_config:
+                                # Merge: device config overrides profile
+                                merged_port_config[port_name].update(port_cfg)
+                            else:
+                                merged_port_config[port_name] = port_cfg
+                    
+                    # Extract WAN port configurations keyed by port name
+                    for port_name, port_cfg in merged_port_config.items():
+                        if port_cfg.get('usage') == 'wan':
+                            ip_cfg = port_cfg.get('ip_config', {})
+                            description = port_cfg.get('description', '').strip()
+                            vlan_id = port_cfg.get('vlan_id', '')
                             
-                            # Extract IP configurations from port_config
-                            if 'port_config' in config_data:
-                                for port_name, port_cfg in config_data['port_config'].items():
-                                    if port_cfg.get('usage') == 'wan':
-                                        ip_cfg = port_cfg.get('ip_config', {})
-                                        wan_cfg = port_cfg.get('wan_config', {})
-                                        description = port_cfg.get('description', '').strip()
-                                        
-                                        # Store IP config by description for matching with runtime ports
-                                        if description:
-                                            ip_config_by_desc[description] = {
-                                                'description': description,
-                                                'ip': ip_cfg.get('ip', ''),
-                                                'netmask': ip_cfg.get('netmask', ''),
-                                                'gateway': ip_cfg.get('gateway', ''),
-                                                'type': ip_cfg.get('type', 'dhcp'),
-                                                'override': 'yes' if port_cfg.get('override', False) else 'no',
-                                                'disabled': port_cfg.get('disabled', False)
-                                            }
-                        
-                        # Get actual runtime IP addresses (including DHCP) from if_stat
+                            wan_port_config_by_name[port_name] = {
+                                'name': port_cfg.get('name', ''),
+                                'description': description,
+                                'ip': ip_cfg.get('ip', ''),
+                                'netmask': ip_cfg.get('netmask', ''),
+                                'gateway': ip_cfg.get('gateway', ''),
+                                'type': ip_cfg.get('type', 'dhcp'),
+                                'vlan_id': str(vlan_id) if vlan_id else '',
+                                'override': 'yes' if port_cfg.get('override', False) else 'no',
+                                'disabled': port_cfg.get('disabled', False)
+                            }
+                    
+                    # Get runtime IPs from searchSiteDevices (needed for DHCP IP addresses)
+                    if gw_site_id:
                         device_search_response = mistapi.api.v1.sites.devices.searchSiteDevices(
                             self.apisession,
                             gw_site_id,
@@ -332,7 +455,6 @@ class MistConnection:
                             if search_results and 'if_stat' in search_results[0]:
                                 if_stat = search_results[0]['if_stat']
                                 
-                                # Extract runtime IPs for WAN interfaces
                                 for if_name, if_data in if_stat.items():
                                     if if_data.get('port_usage') == 'wan':
                                         port_id = if_data.get('port_id', '')
@@ -353,25 +475,43 @@ class MistConnection:
                                                 'netmask': netmask,
                                                 'address_mode': if_data.get('address_mode', 'Unknown')
                                             }
-                    except Exception as e:
-                        logger.warning(f"Could not fetch config for gateway {gw_id}: {str(e)}")
+                except Exception as e:
+                    logger.warning(f"Could not process config for gateway {gw_id}: {str(e)}")
                 
                 # Combine WAN port stats with IP configuration
                 for port in wan_ports:
-                    port_id = port.get('port_id')
+                    port_id = port.get('port_id')  # e.g., 'ge-0/0/1' or 'ge-0/0/1.30'
                     port_desc = port.get('port_desc', '').strip()
                     
-                    # Match by description to get IP configuration
-                    ip_config = ip_config_by_desc.get(port_desc, {})
+                    # Match by port_id (exact match first)
+                    port_config = wan_port_config_by_name.get(port_id, {})
                     
-                    # If no match found in config, assume DHCP (most WAN ports use DHCP)
-                    if not ip_config:
-                        ip_config = {
+                    # If no exact match, try to find VLAN-tagged config for base interface
+                    # e.g., port_id='ge-0/0/3' should match config key 'ge-0/0/3.301'
+                    if not port_config:
+                        for cfg_name, cfg in wan_port_config_by_name.items():
+                            # Check if config key starts with port_id and has VLAN suffix
+                            if cfg_name.startswith(port_id + '.'):
+                                port_config = cfg
+                                break
+                    
+                    # If still no match, try by description (fallback)
+                    if not port_config and port_desc:
+                        for cfg_name, cfg in wan_port_config_by_name.items():
+                            if cfg.get('description') == port_desc:
+                                port_config = cfg
+                                break
+                    
+                    # If still no match, use defaults
+                    if not port_config:
+                        port_config = {
+                            'name': '',
                             'description': port_desc,
                             'ip': '',
                             'netmask': '',
                             'gateway': '',
                             'type': 'dhcp',  # Default to DHCP for unconfigured ports
+                            'vlan_id': '',
                             'override': 'no',
                             'disabled': False
                         }
@@ -380,7 +520,7 @@ class MistConnection:
                     runtime_ip_data = runtime_ips_by_port.get(port_id, {})
                     
                     # Use runtime IP if available (for DHCP ports)
-                    if runtime_ip_data and ip_config.get('type') == 'dhcp':
+                    if runtime_ip_data and port_config.get('type') == 'dhcp':
                         ip_addr = runtime_ip_data.get('ip', '')
                         netmask_str = runtime_ip_data.get('netmask', '')
                         # Convert dotted-decimal netmask to CIDR
@@ -392,37 +532,32 @@ class MistConnection:
                             netmask = netmask_str
                     else:
                         # Use configured static IP
-                        ip_addr = ip_config.get('ip', '').strip()
-                        netmask = ip_config.get('netmask', '').strip()
+                        ip_addr = port_config.get('ip', '').strip()
+                        netmask = port_config.get('netmask', '').strip()
                         
                         # Remove leading slash from netmask if present (CIDR notation)
                         if netmask.startswith('/'):
                             netmask = netmask[1:]
                     
-                    # Get windowed traffic statistics from insights API if time range provided
-                    if start is not None and end is not None and gw_site_id and gw_id:
-                        windowed_stats = self._get_port_windowed_traffic(
-                            gw_site_id, gw_id, port_id, start, end
-                        )
-                        rx_bytes = windowed_stats.get('rx_bytes', 0)
-                        tx_bytes = windowed_stats.get('tx_bytes', 0)
-                    else:
-                        # Fallback to cumulative stats
-                        rx_bytes = port.get('rx_bytes', 0)
-                        tx_bytes = port.get('tx_bytes', 0)
+                    # Use cumulative stats from org-level port search (no per-port API calls)
+                    # The searchOrgSwOrGwPorts endpoint provides traffic data for the time range
+                    rx_bytes = port.get('rx_bytes', 0)
+                    tx_bytes = port.get('tx_bytes', 0)
                     
                     port_configs.append({
                         'name': port_id,
-                        'description': ip_config.get('description', port.get('port_desc', '')),
-                        'enabled': port.get('up', False) and not ip_config.get('disabled', False),
+                        'wan_name': port_config.get('name', ''),  # WAN name from config (e.g., 'BB-Hub-1')
+                        'description': port_config.get('description', port.get('port_desc', '')),
+                        'enabled': port.get('up', False) and not port_config.get('disabled', False),
                         'usage': 'wan',
                         # IP Configuration (runtime for DHCP, configured for static)
                         'ip': ip_addr,
                         'netmask': netmask,
-                        'gateway': ip_config.get('gateway', ''),
-                        'type': ip_config.get('type', 'unknown'),
-                        'override': ip_config.get('override', 'no'),
-                        # Statistics - windowed if time range provided, otherwise cumulative
+                        'gateway': port_config.get('gateway', ''),
+                        'type': port_config.get('type', 'unknown'),
+                        'vlan_id': port_config.get('vlan_id', ''),
+                        'override': port_config.get('override', 'no'),
+                        # Statistics from org-level port search
                         'up': port.get('up', False),
                         'rx_bytes': rx_bytes,
                         'tx_bytes': tx_bytes,
@@ -433,6 +568,77 @@ class MistConnection:
                         'speed': port.get('speed', 0),
                         'mac': port.get('port_mac', '')
                     })
+                
+                # Add WAN ports from config that don't have stats yet
+                # These are configured WAN ports that may be down or not reporting stats
+                ports_with_stats = set()
+                for pc in port_configs:
+                    ports_with_stats.add(pc.get('name', ''))
+                    # Also track base interface for VLAN-tagged ports
+                    port_name = pc.get('name', '')
+                    if '.' in port_name:
+                        base_port = port_name.split('.')[0]
+                        ports_with_stats.add(base_port)
+                
+                for cfg_port_name, cfg in wan_port_config_by_name.items():
+                    # Skip Jinja template variables (unresolved template placeholders)
+                    if '{{' in cfg_port_name or '}}' in cfg_port_name:
+                        continue
+                    
+                    # Extract base port name (e.g., 'ge-0/0/1' from 'ge-0/0/1.30')
+                    base_port_name = cfg_port_name.split('.')[0] if '.' in cfg_port_name else cfg_port_name
+                    
+                    # Skip if we already have stats for this port
+                    if cfg_port_name in ports_with_stats or base_port_name in ports_with_stats:
+                        continue
+                    
+                    # Get runtime IP if available
+                    runtime_ip_data = runtime_ips_by_port.get(base_port_name, {})
+                    if runtime_ip_data and cfg.get('type') == 'dhcp':
+                        ip_addr = runtime_ip_data.get('ip', '')
+                        netmask_str = runtime_ip_data.get('netmask', '')
+                        if netmask_str and '.' in netmask_str:
+                            parts = netmask_str.split('.')
+                            binary = ''.join([bin(int(x)+256)[3:] for x in parts])
+                            netmask = str(binary.count('1'))
+                        else:
+                            netmask = netmask_str
+                    else:
+                        ip_addr = cfg.get('ip', '').strip()
+                        netmask = cfg.get('netmask', '').strip()
+                        if netmask.startswith('/'):
+                            netmask = netmask[1:]
+                    
+                    # Get physical port status from org-level port stats
+                    port_stats = device_port_stats.get(base_port_name, {})
+                    physical_up = port_stats.get('up', False)
+                    port_speed = port_stats.get('speed', 0)
+                    
+                    port_configs.append({
+                        'name': base_port_name,
+                        'wan_name': cfg.get('name', ''),
+                        'description': cfg.get('description', ''),
+                        'enabled': physical_up and not cfg.get('disabled', False),
+                        'usage': 'wan',
+                        'ip': ip_addr,
+                        'netmask': netmask,
+                        'gateway': cfg.get('gateway', ''),
+                        'type': cfg.get('type', 'unknown'),
+                        'vlan_id': cfg.get('vlan_id', ''),
+                        'override': cfg.get('override', 'no'),
+                        'up': physical_up,  # Physical status from org port stats
+                        'rx_bytes': port_stats.get('rx_bytes', 0),
+                        'tx_bytes': port_stats.get('tx_bytes', 0),
+                        'rx_pkts': port_stats.get('rx_pkts', 0),
+                        'tx_pkts': port_stats.get('tx_pkts', 0),
+                        'rx_errors': port_stats.get('rx_errors', 0),
+                        'tx_errors': port_stats.get('tx_errors', 0),
+                        'speed': port_speed,
+                        'mac': port_stats.get('port_mac', '')
+                    })
+                
+                # Sort ports by name for consistent display
+                port_configs.sort(key=lambda p: p.get('name', ''))
                 
                 gateway_stats.append({
                     'id': gw_id,

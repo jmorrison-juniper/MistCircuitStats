@@ -36,7 +36,7 @@
         .card {
             background-color: #2d2d2d;
             border: 1px solid #404040;
-            margin-bottom: 1rem;
+            margin-bottom: 0.5rem;
         }
         
         .card-header {
@@ -54,8 +54,8 @@
         }
         
         .badge {
-            font-size: 0.85rem;
-            padding: 0.35em 0.65em;
+            font-size: 0.75rem;
+            padding: 0.25em 0.5em;
         }
         
         .badge.status-connected {
@@ -76,17 +76,17 @@
         
         .stats-card {
             text-align: center;
-            padding: 1rem;
+            padding: 0.75rem 0.5rem;
         }
         
         .stats-value {
-            font-size: 2rem;
+            font-size: 1.75rem;
             font-weight: bold;
             color: var(--tmobile-magenta);
         }
         
         .stats-label {
-            font-size: 0.9rem;
+            font-size: 0.8rem;
             color: #a0a0a0;
         }
         
@@ -133,21 +133,32 @@
         }
         
         .port-details-container {
-            padding: 1rem;
+            padding: 0.5rem;
         }
         
         .port-details-table {
             background: #2a2a2a;
             border-radius: 4px;
+            font-size: 0.8rem;
         }
         
         .port-details-table th {
-            font-size: 0.85rem;
+            font-size: 0.75rem;
             background: #333;
+            padding: 0.35rem 0.4rem;
+            white-space: nowrap;
         }
         
         .port-details-table td {
-            font-size: 0.9rem;
+            font-size: 0.8rem;
+            padding: 0.3rem 0.4rem;
+            white-space: nowrap;
+        }
+        
+        .port-details-table .badge {
+            font-size: 0.7rem;
+            padding: 0.2em 0.4em;
+        }
         }
         
         /* Traffic data clickable cells */
@@ -250,8 +261,28 @@
         /* iPad landscape optimization */
         @media (min-width: 1024px) and (orientation: landscape) {
             .container-fluid {
-                max-width: 1400px;
+                max-width: 100%;
+                padding-left: 1rem;
+                padding-right: 1rem;
             }
+        }
+        
+        /* Compact table for all screens */
+        .table-compact th,
+        .table-compact td {
+            padding: 0.4rem 0.5rem;
+        }
+        
+        /* Main gateway table compact styling */
+        .gateway-table .table th {
+            font-size: 0.85rem;
+            padding: 0.5rem;
+        }
+        
+        .gateway-table .table td {
+            font-size: 0.85rem;
+            padding: 0.4rem 0.5rem;
+            vertical-align: middle;
         }
         
         .toast-container {
@@ -301,9 +332,9 @@
     </nav>
 
     <!-- Main Content -->
-    <div class="container-fluid mt-4">
+    <div class="container-fluid mt-2">
         <!-- Summary Stats -->
-        <div class="row mb-4">
+        <div class="row mb-2">
             <div class="col-md-3">
                 <div class="card stats-card">
                     <div class="stats-value" id="totalGateways">-</div>
@@ -331,17 +362,17 @@
         </div>
 
         <!-- Info Alert -->
-        <div class="alert alert-info mb-3" role="alert">
+        <div class="alert alert-info mb-2 py-2" role="alert" style="font-size: 0.85rem;">
             <i class="bi bi-info-circle"></i> <strong>Note:</strong> RX/TX data shows traffic totals for the selected timeframe. Use the buttons above to view different time periods.
         </div>
 
         <!-- Search and Filters -->
-        <div class="row mb-3">
+        <div class="row mb-2">
             <div class="col-md-6">
-                <input type="text" class="form-control search-box" id="searchInput" placeholder="Search gateways by name or site...">
+                <input type="text" class="form-control form-control-sm search-box" id="searchInput" placeholder="Search gateways by name or site...">
             </div>
             <div class="col-md-6 text-end">
-                <select class="form-select d-inline-block w-auto" id="siteFilter">
+                <select class="form-select form-select-sm d-inline-block w-auto" id="siteFilter">
                     <option value="">All Sites</option>
                 </select>
             </div>
@@ -604,6 +635,7 @@
                         <thead>
                             <tr>
                                 <th>Port Name</th>
+                                <th>WAN Name</th>
                                 <th>Description</th>
                                 <th>Enablement</th>
                                 <th>Physical Status</th>
@@ -620,13 +652,13 @@
                         </thead>
                         <tbody>
                             ${gateway.ports.map(port => {
-                                // Extract VLAN from port name (e.g., ge-0/0/0.20 -> 20)
-                                const vlanMatch = port.name.match(/\.(\d+)$/);
-                                const vlan = vlanMatch ? vlanMatch[1] : '-';
+                                // Use vlan_id from backend, fallback to parsing from port name
+                                const vlan = port.vlan_id || (port.name.match(/\.(\d+)$/) ? port.name.match(/\.(\d+)$/)[1] : '-');
                                 
                                 return `
                                 <tr>
                                     <td><strong>${port.name}</strong></td>
+                                    <td>${port.wan_name || '-'}</td>
                                     <td>${port.description || '-'}</td>
                                     <td>
                                         <span class="badge ${port.enabled ? 'bg-success' : 'bg-danger'}">
@@ -700,7 +732,7 @@
             // Build CSV content - matching table columns exactly
             const headers = [
                 'Site Name', 'Router Hostname', 'Model', 'Status', 'External IP', 'Uptime',
-                'Port Name', 'Description', 'Enablement', 'Physical Status', 
+                'Port Name', 'WAN Name', 'Description', 'Enablement', 'Physical Status', 
                 'Gateway IP', 'WAN IP', 'VLAN', 'CIDR', 'Config Type', 'Override', 'Peer Paths',
                 'RX Data (Bytes)', 'TX Data (Bytes)'
             ];
@@ -724,9 +756,8 @@
                 
                 if (gateway.ports && gateway.ports.length > 0) {
                     gateway.ports.forEach(port => {
-                        // Extract VLAN from port name
-                        const vlanMatch = port.name.match(/\.(\d+)$/);
-                        const vlan = vlanMatch ? vlanMatch[1] : '-';
+                        // Use vlan_id from backend, fallback to parsing from port name
+                        const vlan = port.vlan_id || (port.name.match(/\.(\d+)$/) ? port.name.match(/\.(\d+)$/)[1] : '-');
                         
                         const peers = peersByPort[port.name] || [];
                         const upCount = peers.filter(p => p.up).length;
@@ -741,6 +772,7 @@
                             ipAddress,
                             uptime,
                             port.name || '',
+                            port.wan_name || '',
                             port.description || '',
                             port.enabled ? 'Enabled' : 'Disabled',
                             port.up ? 'Up' : 'Down',
@@ -764,7 +796,7 @@
                         status,
                         ipAddress,
                         uptime,
-                        '', '', '', '', '', '', '', '', '', '', '-', 0, 0
+                        '', '', '', '', '', '', '', '', '', '', '', '', '-', 0, 0
                     ]);
                 }
             });
