@@ -4,8 +4,12 @@ MistCircuitStats - Flask application for displaying Gateway WAN port statistics
 import os
 import logging
 from datetime import datetime
+from dotenv import load_dotenv
 from flask import Flask, render_template, jsonify, request
 from mist_connection import MistConnection
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure logging
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
