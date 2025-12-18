@@ -81,7 +81,7 @@ def get_gateways():
     try:
         import time
         site_id = request.args.get('site_id')
-        duration = request.args.get('duration', '1d')
+        duration = request.args.get('duration', '7d')  # Default to 7 days
         
         # Calculate epoch timestamps based on duration
         end = int(time.time())

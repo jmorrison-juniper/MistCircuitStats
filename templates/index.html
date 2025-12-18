@@ -174,20 +174,23 @@
             background-color: #2a2a2a;
         }
         
-        /* Chart modal */
+        /* Chart modal - dynamically scales with window */
         .chart-modal {
             position: fixed;
             top: 50%;
             left: 50%;
             transform: translate(-50%, -50%);
-            width: 90%;
-            max-width: 900px;
+            width: 90vw;
+            max-width: 1400px;
+            height: auto;
+            max-height: 85vh;
             background: #2d2d2d;
             border: 2px solid var(--tmobile-magenta);
             border-radius: 12px;
             padding: 1.5rem;
             z-index: 1050;
             box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+            overflow-y: auto;
         }
         
         .chart-modal-backdrop {
@@ -241,7 +244,9 @@
         
         .chart-container-small {
             position: relative;
-            height: 350px;
+            height: calc(50vh - 100px);
+            min-height: 250px;
+            max-height: 450px;
         }
         
         .chart-title {
@@ -264,6 +269,46 @@
                 max-width: 100%;
                 padding-left: 1rem;
                 padding-right: 1rem;
+            }
+        }
+        
+        /* Chart modal responsive sizing */
+        @media (max-width: 768px) {
+            .chart-modal {
+                width: 95vw;
+                padding: 1rem;
+                max-height: 90vh;
+            }
+            
+            .chart-modal-header {
+                flex-wrap: wrap;
+                gap: 0.5rem;
+            }
+            
+            .chart-modal-title {
+                font-size: 1rem;
+                width: 100%;
+            }
+            
+            .chart-container-small {
+                height: calc(40vh - 50px);
+                min-height: 200px;
+            }
+            
+            .chart-modal .btn-group {
+                flex-wrap: wrap;
+            }
+            
+            .chart-modal .btn-group .btn {
+                font-size: 0.75rem;
+                padding: 0.25rem 0.5rem;
+            }
+        }
+        
+        @media (min-width: 1400px) {
+            .chart-container-small {
+                height: calc(55vh - 100px);
+                max-height: 500px;
             }
         }
         
@@ -315,11 +360,6 @@
                 <i class="bi bi-router"></i> Mist Circuit Stats
             </span>
             <div class="d-flex align-items-center">
-                <div class="btn-group me-3" role="group" aria-label="Timeframe selector">
-                    <button type="button" class="btn btn-sm btn-outline-light" onclick="changeTimeframe('1h')" id="btn-1h">1 Hour</button>
-                    <button type="button" class="btn btn-sm btn-outline-light active" onclick="changeTimeframe('1d')" id="btn-1d">24 Hours</button>
-                    <button type="button" class="btn btn-sm btn-outline-light" onclick="changeTimeframe('7d')" id="btn-7d">7 Days</button>
-                </div>
                 <span class="badge bg-secondary me-2" id="orgBadge">Loading...</span>
                 <button class="btn btn-sm btn-outline-light me-2" onclick="downloadCSV()">
                     <i class="bi bi-download"></i> Export CSV
@@ -363,7 +403,7 @@
 
         <!-- Info Alert -->
         <div class="alert alert-info mb-2 py-2" role="alert" style="font-size: 0.85rem;">
-            <i class="bi bi-info-circle"></i> <strong>Note:</strong> RX/TX data shows traffic totals for the selected timeframe. Use the buttons above to view different time periods.
+            <i class="bi bi-info-circle"></i> <strong>Note:</strong> RX/TX data shows 7-day traffic totals. Click on traffic values to view detailed charts with adjustable timeframes.
         </div>
 
         <!-- Search and Filters -->
@@ -444,7 +484,15 @@
     <div id="chartModal" class="chart-modal" style="display: none;">
         <div class="chart-modal-header">
             <div class="chart-modal-title" id="chartModalTitle">Port Traffic</div>
-            <button class="chart-modal-close" onclick="closeChartModal()">&times;</button>
+            <div class="d-flex align-items-center">
+                <div class="btn-group me-3" role="group" aria-label="Chart timeframe selector">
+                    <button type="button" class="btn btn-sm btn-outline-light" onclick="filterChartData('1h')" id="chart-btn-1h">1 Hour</button>
+                    <button type="button" class="btn btn-sm btn-outline-light" onclick="filterChartData('6h')" id="chart-btn-6h">6 Hours</button>
+                    <button type="button" class="btn btn-sm btn-outline-light" onclick="filterChartData('1d')" id="chart-btn-1d">24 Hours</button>
+                    <button type="button" class="btn btn-sm btn-outline-light active" onclick="filterChartData('7d')" id="chart-btn-7d">7 Days</button>
+                </div>
+                <button class="chart-modal-close" onclick="closeChartModal()">&times;</button>
+            </div>
         </div>
         <div class="row g-3 px-3">
             <div class="col-md-6">
@@ -485,8 +533,11 @@
     <script>
         let allGateways = [];
         let allSites = [];
-        let currentDuration = '1d';
+        let currentDuration = '7d';  // Always fetch 7 days of data
         let vpnPeerCache = {};
+        let cachedTrafficData = null;  // Cache for 7-day traffic data
+        let currentChartContext = null;  // Store current chart context for filtering
+        let currentChartViewDuration = '7d';  // Current view in the chart modal
         
         // Initialize on page load
         document.addEventListener('DOMContentLoaded', function() {
@@ -497,15 +548,8 @@
             document.getElementById('siteFilter').addEventListener('change', filterGateways);
         });
         
-        function changeTimeframe(duration) {
-            // Update active button
-            document.querySelectorAll('.btn-group button').forEach(btn => btn.classList.remove('active'));
-            document.getElementById('btn-' + duration).classList.add('active');
-            
-            // Update current duration and reload data
-            currentDuration = duration;
-            refreshData();
-        }
+        // Removed changeTimeframe function - now always fetching 7d data
+        // Chart view filtering is handled by filterChartData()
         
         async function loadData() {
             try {
@@ -524,8 +568,8 @@
                     populateSiteFilter();
                 }
                 
-                // Load gateways
-                const gatewaysResponse = await fetch(`/api/gateways?duration=${currentDuration}`);
+                // Load gateways (always fetches 7-day data)
+                const gatewaysResponse = await fetch('/api/gateways');
                 const gatewaysData = await gatewaysResponse.json();
                 
                 if (gatewaysData.success) {
@@ -759,7 +803,19 @@
                         // Use vlan_id from backend, fallback to parsing from port name
                         const vlan = port.vlan_id || (port.name.match(/\.(\d+)$/) ? port.name.match(/\.(\d+)$/)[1] : '-');
                         
-                        const peers = peersByPort[port.name] || [];
+                        // Get peer paths - try exact match first, then look for VLAN-tagged ports
+                        let peers = peersByPort[port.name] || [];
+                        
+                        // If no exact match, look for peers that start with this port name (e.g., ge-0/0/0.20 starts with ge-0/0/0)
+                        if (peers.length === 0) {
+                            peers = [];
+                            for (const [portId, portPeers] of Object.entries(peersByPort)) {
+                                if (portId.startsWith(port.name + '.') || portId === port.name) {
+                                    peers.push(...portPeers);
+                                }
+                            }
+                        }
+                        
                         const upCount = peers.filter(p => p.up).length;
                         const totalCount = peers.length;
                         const peerPathsStr = totalCount > 0 ? `${upCount}/${totalCount}` : '-';
@@ -818,9 +874,9 @@
             const link = document.createElement('a');
             const url = URL.createObjectURL(blob);
             
-            // Generate filename with timestamp and timeframe
+            // Generate filename with timestamp (always 7-day data)
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-            const filename = `mist-circuit-stats-${currentDuration}-${timestamp}.csv`;
+            const filename = `mist-circuit-stats-7d-${timestamp}.csv`;
             
             link.setAttribute('href', url);
             link.setAttribute('download', filename);
@@ -859,39 +915,78 @@
                 trafficChartDataInstance.destroy();
                 trafficChartDataInstance = null;
             }
+            // Clear cached data
+            cachedTrafficData = null;
+            currentChartContext = null;
+        }
+        
+        function updateChartFilterButtons() {
+            // Update active button state for chart filter
+            ['1h', '6h', '1d', '7d'].forEach(dur => {
+                const btn = document.getElementById(`chart-btn-${dur}`);
+                if (btn) {
+                    if (dur === currentChartViewDuration) {
+                        btn.classList.add('active');
+                    } else {
+                        btn.classList.remove('active');
+                    }
+                }
+            });
+        }
+        
+        function filterChartData(viewDuration) {
+            currentChartViewDuration = viewDuration;
+            updateChartFilterButtons();
+            
+            // Re-fetch data with optimal resolution for the selected duration
+            fetchAndDisplayTraffic(viewDuration);
         }
         
         async function showTrafficChart(siteId, deviceId, portId, gatewayName) {
             // Show modal immediately
             document.getElementById('chartModal').style.display = 'block';
             document.getElementById('chartModalBackdrop').style.display = 'block';
-            // Get human-readable duration
-            const durationLabels = {
-                '1h': '1 Hour',
-                '1d': '1 Day',
-                '7d': '7 Days'
-            };
-            const durationLabel = durationLabels[currentDuration] || '1 Day';
-            document.getElementById('chartModalTitle').textContent = `${gatewayName} - ${portId} Traffic (${durationLabel})`;
             
-            // Calculate time range based on current duration
+            // Reset to 7d view and update button states
+            currentChartViewDuration = '7d';
+            updateChartFilterButtons();
+            
+            document.getElementById('chartModalTitle').textContent = `${gatewayName} - ${portId} Traffic`;
+            
+            // Store context for filtering/re-fetching
+            currentChartContext = { siteId, deviceId, portId, gatewayName };
+            
+            // Fetch data for the current view
+            await fetchAndDisplayTraffic('7d');
+        }
+        
+        async function fetchAndDisplayTraffic(viewDuration) {
+            if (!currentChartContext) return;
+            
+            const { siteId, deviceId, portId } = currentChartContext;
+            
             const end = Math.floor(Date.now() / 1000);
-            const durationMap = {
-                '1h': 60 * 60,
-                '1d': 24 * 60 * 60,
-                '7d': 7 * 24 * 60 * 60
-            };
-            const duration = durationMap[currentDuration] || 24 * 60 * 60;
-            const start = end - duration;
             
-            // Use 10-minute intervals for 1 hour view, hourly for others
-            const interval = currentDuration === '1h' ? 600 : 3600;
+            // Use optimal resolution based on duration:
+            // Mist API stores data at ~10-min granularity, finer intervals have nulls
+            // - 1h: 5-min resolution (12 points) - best detail for short window
+            // - 6h: 5-min resolution (72 points) - good detail
+            // - 1d: 10-min resolution (144 points, ~88% valid)
+            // - 7d: 1-hour resolution (168 points, 100% valid)
+            const durationConfig = {
+                '1h':  { seconds: 60 * 60,          interval: 300 },   // 12 points at 5-min
+                '6h':  { seconds: 6 * 60 * 60,      interval: 300 },   // 72 points at 5-min
+                '1d':  { seconds: 24 * 60 * 60,     interval: 600 },   // 144 points at 10-min
+                '7d':  { seconds: 7 * 24 * 60 * 60, interval: 3600 }   // 168 points at 1-hour
+            };
+            
+            const config = durationConfig[viewDuration] || durationConfig['7d'];
+            const start = end - config.seconds;
             
             try {
-                // Fetch time-series data from insights API
                 const response = await fetch(
                     `/api/gateway/${deviceId}/port/${encodeURIComponent(portId)}/traffic?` +
-                    `site_id=${siteId}&start=${start}&end=${end}&interval=${interval}`
+                    `site_id=${siteId}&start=${start}&end=${end}&interval=${config.interval}`
                 );
                 
                 if (!response.ok) {
@@ -904,15 +999,15 @@
                     throw new Error(result.error || 'Failed to fetch traffic data');
                 }
                 
-                // Add interval to data
-                result.data.interval = interval;
+                // Add interval to data and cache it
+                result.data.interval = config.interval;
+                cachedTrafficData = result.data;
                 
-                // Create both charts
+                // Create charts
                 createTrafficCharts(result.data, portId);
             } catch (error) {
                 console.error('Error fetching traffic data:', error);
                 showToast('Failed to load traffic chart', 'danger');
-                closeChartModal();
             }
         }
         
