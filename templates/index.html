@@ -98,12 +98,69 @@
             color: var(--tmobile-magenta);
         }
         
+        /* Table styles */
+        .gateway-table {
+            background: #2a2a2a;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        
+        .gateway-table table {
+            margin-bottom: 0;
+        }
+        
+        .gateway-row {
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        
+        .gateway-row:hover {
+            background-color: #333 !important;
+        }
+        
+        .gateway-row.expanded {
+            background-color: #2d2d2d !important;
+        }
+        
+        .port-details-row {
+            background-color: #1f1f1f !important;
+            display: none;
+        }
+        
+        .port-details-row.show {
+            display: table-row;
+        }
+        
+        .port-details-container {
+            padding: 1rem;
+        }
+        
+        .port-details-table {
+            background: #2a2a2a;
+            border-radius: 4px;
+        }
+        
+        .port-details-table th {
+            font-size: 0.85rem;
+            background: #333;
+        }
+        
+        .port-details-table td {
+            font-size: 0.9rem;
+        }
+        
+        .expand-icon {
+            transition: transform 0.3s;
+        }
+        
+        .expand-icon.expanded {
+            transform: rotate(90deg);
+        }
+        
         /* iPad landscape optimization */
         @media (min-width: 1024px) and (orientation: landscape) {
-            .gateway-grid {
-                display: grid;
-                grid-template-columns: repeat(3, 1fr);
-                gap: 1rem;
+            .container-fluid {
+                max-width: 1400px;
             }
         }
         
@@ -186,9 +243,27 @@
             <p class="mt-3">Loading gateway statistics...</p>
         </div>
 
-        <!-- Gateway Cards -->
-        <div id="gatewayContainer" class="gateway-grid" style="display: none;">
-            <!-- Gateway cards will be inserted here -->
+        <!-- Gateway Table -->
+        <div id="gatewayContainer" class="gateway-table" style="display: none;">
+            <div class="table-responsive">
+                <table class="table table-dark table-hover mb-0">
+                    <thead>
+                        <tr>
+                            <th style="width: 30px;"></th>
+                            <th>Site Name</th>
+                            <th>Router Hostname</th>
+                            <th>Model</th>
+                            <th>Status</th>
+                            <th>IP Address</th>
+                            <th>Ports</th>
+                            <th>Uptime</th>
+                        </tr>
+                    </thead>
+                    <tbody id="gatewayTableBody">
+                        <!-- Rows will be inserted here -->
+                    </tbody>
+                </table>
+            </div>
         </div>
     </div>
 
@@ -305,132 +380,113 @@
         }
         
         function renderGateways(gateways) {
-            const container = document.getElementById('gatewayContainer');
-            container.innerHTML = '';
+            const tbody = document.getElementById('gatewayTableBody');
+            tbody.innerHTML = '';
             
             if (gateways.length === 0) {
-                container.innerHTML = '<div class="col-12"><p class="text-center text-muted">No gateways found</p></div>';
+                tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">No gateways found</td></tr>';
                 return;
             }
             
-            gateways.forEach(gateway => {
-                const card = createGatewayCard(gateway);
-                container.appendChild(card);
+            gateways.forEach((gateway, index) => {
+                // Main gateway row
+                const row = createGatewayRow(gateway, index);
+                tbody.appendChild(row);
+                
+                // Expandable port details row
+                const detailsRow = createPortDetailsRow(gateway, index);
+                tbody.appendChild(detailsRow);
             });
         }
         
-        function createGatewayCard(gateway) {
-            const card = document.createElement('div');
-            card.className = 'card';
+        function createGatewayRow(gateway, index) {
+            const row = document.createElement('tr');
+            row.className = 'gateway-row';
+            row.id = `gateway-row-${index}`;
+            row.onclick = () => togglePortDetails(index);
             
             const statusClass = gateway.status === 'connected' ? 'status-connected' : 'status-disconnected';
             const uptimeHours = Math.floor(gateway.uptime / 3600);
+            const uptimeDays = Math.floor(uptimeHours / 24);
+            const uptimeDisplay = uptimeDays > 0 ? `${uptimeDays}d ${uptimeHours % 24}h` : `${uptimeHours}h`;
             
-            card.innerHTML = `
-                <div class="card-header d-flex justify-content-between align-items-center">
-                    <span><i class="bi bi-router"></i> ${gateway.name}</span>
-                    <span class="badge ${statusClass}">${gateway.status}</span>
-                </div>
-                <div class="card-body">
-                    <p class="mb-2"><strong>Site:</strong> ${gateway.site_name}</p>
-                    <p class="mb-2"><strong>Model:</strong> ${gateway.model}</p>
-                    <p class="mb-2"><strong>Uptime:</strong> ${uptimeHours}h</p>
-                    <p class="mb-3"><strong>IP:</strong> ${gateway.ip || 'N/A'}</p>
-                    
-                    <h6 class="mb-2">WAN Ports (${gateway.ports.length})</h6>
-                    <div class="table-responsive">
-                        <table class="table table-sm">
-                            <thead>
-                                <tr>
-                                    <th>Port</th>
-                                    <th>Status</th>
-                                    <th>RX</th>
-                                    <th>TX</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                ${gateway.ports.map(port => `
-                                    <tr>
-                                        <td>${port.name}</td>
-                                        <td><i class="bi bi-circle-fill ${port.up ? 'port-up' : 'port-down'}"></i></td>
-                                        <td>${formatBytes(port.rx_bytes)}</td>
-                                        <td>${formatBytes(port.tx_bytes)}</td>
-                                    </tr>
-                                `).join('')}
-                            </tbody>
-                        </table>
-                    </div>
-                    
-                    <button class="btn btn-sm btn-primary w-100 mt-2" onclick="showGatewayDetails('${gateway.id}')">
-                        <i class="bi bi-info-circle"></i> View Details
-                    </button>
-                </div>
+            row.innerHTML = `
+                <td><i class="bi bi-chevron-right expand-icon" id="icon-${index}"></i></td>
+                <td>${gateway.site_name || 'Unknown Site'}</td>
+                <td><strong>${gateway.name}</strong></td>
+                <td>${gateway.model}</td>
+                <td><span class="badge ${statusClass}">${gateway.status}</span></td>
+                <td>${gateway.ip || 'N/A'}</td>
+                <td>${gateway.num_ports}</td>
+                <td>${uptimeDisplay}</td>
             `;
             
-            return card;
+            return row;
         }
         
-        async function showGatewayDetails(gatewayId) {
-            const modal = new bootstrap.Modal(document.getElementById('gatewayModal'));
-            const gateway = allGateways.find(gw => gw.id === gatewayId);
+        function createPortDetailsRow(gateway, index) {
+            const detailsRow = document.createElement('tr');
+            detailsRow.className = 'port-details-row';
+            detailsRow.id = `details-row-${index}`;
             
-            document.getElementById('modalTitle').textContent = gateway.name + ' - Detailed Stats';
-            document.getElementById('modalBody').innerHTML = '<div class="text-center"><div class="spinner-border"></div></div>';
-            
-            modal.show();
-            
-            try {
-                const response = await fetch(`/api/gateway/${gatewayId}/ports`);
-                const data = await response.json();
-                
-                if (data.success) {
-                    renderGatewayDetails(data.data);
-                } else {
-                    document.getElementById('modalBody').innerHTML = `<div class="alert alert-danger">Error: ${data.error}</div>`;
-                }
-            } catch (error) {
-                document.getElementById('modalBody').innerHTML = `<div class="alert alert-danger">Error: ${error.message}</div>`;
-            }
-        }
-        
-        function renderGatewayDetails(data) {
-            const ports = Object.entries(data.ports);
-            
-            const html = `
+            const portsHtml = gateway.ports.length > 0 ? `
                 <div class="table-responsive">
-                    <table class="table">
+                    <table class="table table-sm table-dark port-details-table mb-0">
                         <thead>
                             <tr>
-                                <th>Port</th>
+                                <th>Port Name</th>
+                                <th>Description</th>
                                 <th>Status</th>
-                                <th>Speed</th>
-                                <th>RX Bytes</th>
-                                <th>TX Bytes</th>
-                                <th>RX Packets</th>
-                                <th>TX Packets</th>
-                                <th>Errors</th>
+                                <th>Gateway IP</th>
+                                <th>IP Address</th>
+                                <th>Netmask</th>
+                                <th>Config Type</th>
+                                <th>Override</th>
+                                <th>RX Data</th>
+                                <th>TX Data</th>
                             </tr>
                         </thead>
                         <tbody>
-                            ${ports.map(([name, port]) => `
+                            ${gateway.ports.map(port => `
                                 <tr>
-                                    <td><strong>${name}</strong></td>
-                                    <td><i class="bi bi-circle-fill ${port.up ? 'port-up' : 'port-down'}"></i> ${port.up ? 'Up' : 'Down'}</td>
-                                    <td>${port.speed} Mbps</td>
+                                    <td><strong>${port.name}</strong></td>
+                                    <td>${port.description || '-'}</td>
+                                    <td>
+                                        <span class="badge ${port.enabled ? 'bg-success' : 'bg-secondary'}">
+                                            ${port.enabled ? 'Enabled' : 'Disabled'}
+                                        </span>
+                                        ${port.up ? '<i class="bi bi-circle-fill port-up ms-1"></i>' : '<i class="bi bi-circle-fill port-down ms-1"></i>'}
+                                    </td>
+                                    <td>${port.gateway || '-'}</td>
+                                    <td>${port.ip || '-'}</td>
+                                    <td>${port.netmask || '-'}</td>
+                                    <td><span class="badge bg-info">${port.type.toUpperCase()}</span></td>
+                                    <td><span class="badge ${port.override === 'yes' ? 'bg-warning' : 'bg-secondary'}">${port.override.toUpperCase()}</span></td>
                                     <td>${formatBytes(port.rx_bytes)}</td>
                                     <td>${formatBytes(port.tx_bytes)}</td>
-                                    <td>${port.rx_pkts.toLocaleString()}</td>
-                                    <td>${port.tx_pkts.toLocaleString()}</td>
-                                    <td>${port.rx_errors + port.tx_errors}</td>
                                 </tr>
                             `).join('')}
                         </tbody>
                     </table>
                 </div>
-            `;
+            ` : '<p class="text-center text-muted my-3">No port configuration data available</p>';
             
-            document.getElementById('modalBody').innerHTML = html;
+            detailsRow.innerHTML = `<td colspan="8"><div class="port-details-container">${portsHtml}</div></td>`;
+            
+            return detailsRow;
         }
+        
+        function togglePortDetails(index) {
+            const detailsRow = document.getElementById(`details-row-${index}`);
+            const gatewayRow = document.getElementById(`gateway-row-${index}`);
+            const icon = document.getElementById(`icon-${index}`);
+            
+            detailsRow.classList.toggle('show');
+            gatewayRow.classList.toggle('expanded');
+            icon.classList.toggle('expanded');
+        }
+        
+
         
         function formatBytes(bytes) {
             if (bytes === 0) return '0 B';

@@ -79,6 +79,9 @@ Flask web application for displaying Juniper Mist Gateway WAN port statistics us
 - Use YY.MM.DD.HH.MM format for version tags (e.g., `25.12.18.16.30`)
 - Create annotated tags: `git tag -a 25.12.18.16.30 -m "Release notes"`
 - Push tags to trigger builds: `git push origin 25.12.18.16.30`
+- Workflow triggers on tag pattern: `*.*.*.*.*` (YY.MM.DD.HH.MM format)
+- Container image names MUST be lowercase (Docker requirement)
+- Use explicit lowercase name: `jmorrison-juniper/mistcircuitstats` (not `github.repository`)
 - GitHub Actions automatically generates container tags:
   - Timestamp tag: `YY.MM.DD.HH.MM` format (matches git tag)
   - Branch tag: `latest` (for main branch)
