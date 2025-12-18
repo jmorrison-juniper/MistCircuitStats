@@ -658,8 +658,13 @@
                 return;
             }
             
-            // Build CSV content
-            const headers = ['Site', 'Gateway', 'Model', 'Status', 'Port ID', 'Port Description', 'IP Address', 'RX Bytes', 'TX Bytes', 'RX Rate (bps)', 'TX Rate (bps)', 'Port Status'];
+            // Build CSV content - matching table columns exactly
+            const headers = [
+                'Site Name', 'Router Hostname', 'Model', 'Status', 'IP Address', 'Uptime',
+                'Port Name', 'Description', 'Enablement', 'Physical Status', 
+                'Gateway IP', 'IP Address', 'CIDR', 'Config Type', 'Override', 
+                'RX Data (Bytes)', 'TX Data (Bytes)'
+            ];
             const rows = [headers];
             
             // Process each gateway
@@ -668,6 +673,8 @@
                 const gatewayName = gateway.name || gateway.id;
                 const model = gateway.model || '';
                 const status = gateway.status || 'unknown';
+                const ipAddress = gateway.ip || '';
+                const uptime = gateway.uptime_str || '';
                 
                 if (gateway.ports && gateway.ports.length > 0) {
                     gateway.ports.forEach(port => {
@@ -676,14 +683,19 @@
                             gatewayName,
                             model,
                             status,
-                            port.port_id || '',
-                            port.port_desc || '',
-                            port.ip_address || '',
+                            ipAddress,
+                            uptime,
+                            port.name || '',
+                            port.description || '',
+                            port.enabled ? 'Enabled' : 'Disabled',
+                            port.up ? 'Up' : 'Down',
+                            port.gateway || '',
+                            port.ip || '',
+                            port.netmask ? '/' + port.netmask : '',
+                            port.type ? port.type.toUpperCase() : '',
+                            port.override ? port.override.toUpperCase() : '',
                             port.rx_bytes || 0,
-                            port.tx_bytes || 0,
-                            port.rx_bps || 0,
-                            port.tx_bps || 0,
-                            port.up ? 'Up' : 'Down'
+                            port.tx_bytes || 0
                         ]);
                     });
                 } else {
@@ -693,14 +705,9 @@
                         gatewayName,
                         model,
                         status,
-                        '',
-                        '',
-                        '',
-                        0,
-                        0,
-                        0,
-                        0,
-                        'N/A'
+                        ipAddress,
+                        uptime,
+                        '', '', '', '', '', '', '', '', '', 0, 0
                     ]);
                 }
             });
