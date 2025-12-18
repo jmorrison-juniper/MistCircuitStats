@@ -62,6 +62,31 @@ Flask web application for displaying Juniper Mist Gateway WAN port statistics us
 - Use pip's dependency resolver output to identify version constraints
 - Keep requirements.txt version ranges compatible with all dependencies
 
+## Git Repository Management
+- Configure git user for repository: `git config user.name` and `git config user.email`
+- Use descriptive commit messages with bullet points for features
+- Initial commit should include all core files and documentation
+- Verify commit before pushing: `git log --oneline` and `git show --stat`
+
+## GitHub Repository Setup
+- Use GitHub CLI (`gh`) to create and manage repositories
+- Create repository: `gh repo create <name> --public --source=. --description="..." --push`
+- If remote already exists, just push: `git push -u origin main`
+- Monitor builds: `gh run list` and `gh run watch`
+- View repository: `gh repo view --web`
+
+## Release Management & Versioning
+- Use YY.MM.DD.HH.MM format for version tags (e.g., `25.12.18.16.30`)
+- Create annotated tags: `git tag -a 25.12.18.16.30 -m "Release notes"`
+- Push tags to trigger builds: `git push origin 25.12.18.16.30`
+- GitHub Actions automatically generates container tags:
+  - Timestamp tag: `YY.MM.DD.HH.MM` format (matches git tag)
+  - Branch tag: `latest` (for main branch)
+  - Commit SHA tag
+- All builds use YY.MM.DD.HH.MM format for BUILD_DATE and VERSION build args
+- Monitor release builds: `gh run list --limit 3`
+- Container images published to ghcr.io/jmorrison-juniper/mistcircuitstats
+
 ## CI/CD
 - GitHub Actions builds on push to main and v* tags
 - Publishes to ghcr.io/jmorrison-juniper/mistcircuitstats
