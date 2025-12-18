@@ -674,7 +674,10 @@
                 const model = gateway.model || '';
                 const status = gateway.status || 'unknown';
                 const ipAddress = gateway.ip || '';
-                const uptime = gateway.uptime_str || '';
+                // Calculate uptime display (same as table)
+                const uptimeHours = Math.floor((gateway.uptime || 0) / 3600);
+                const uptimeDays = Math.floor(uptimeHours / 24);
+                const uptime = uptimeDays > 0 ? `${uptimeDays}d ${uptimeHours % 24}h` : `${uptimeHours}h`;
                 
                 if (gateway.ports && gateway.ports.length > 0) {
                     gateway.ports.forEach(port => {
