@@ -312,6 +312,13 @@
         
         async function loadData() {
             try {
+                // Load organization info
+                const orgResponse = await fetch('/api/organization');
+                const orgData = await orgResponse.json();
+                if (orgData.success) {
+                    document.getElementById('orgBadge').textContent = orgData.data.org_name;
+                }
+                
                 // Load sites for filter
                 const sitesResponse = await fetch('/api/sites');
                 const sitesData = await sitesResponse.json();
@@ -359,10 +366,6 @@
             document.getElementById('connectedGateways').textContent = connected;
             document.getElementById('totalPorts').textContent = totalPorts;
             document.getElementById('activePorts').textContent = activePorts;
-            
-            if (allGateways.length > 0) {
-                document.getElementById('orgBadge').textContent = allGateways[0].site_name || 'Organization';
-            }
         }
         
         function filterGateways() {
@@ -458,8 +461,8 @@
                                         ${port.up ? '<i class="bi bi-circle-fill port-up ms-1"></i>' : '<i class="bi bi-circle-fill port-down ms-1"></i>'}
                                     </td>
                                     <td>${port.gateway || '-'}</td>
-                                    <td>${port.ip || '-'}</td>
-                                    <td>${port.netmask || '-'}</td>
+                                    <td>${port.ip || (port.type === 'dhcp' ? 'DHCP' : '-')}</td>
+                                    <td>${port.netmask || (port.type === 'dhcp' ? 'Auto' : '-')}</td>
                                     <td><span class="badge bg-info">${port.type.toUpperCase()}</span></td>
                                     <td><span class="badge ${port.override === 'yes' ? 'bg-warning' : 'bg-secondary'}">${port.override.toUpperCase()}</span></td>
                                     <td>${formatBytes(port.rx_bytes)}</td>

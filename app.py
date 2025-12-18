@@ -42,6 +42,17 @@ def health():
     return jsonify({'status': 'healthy', 'timestamp': datetime.utcnow().isoformat()}), 200
 
 
+@app.route('/api/organization')
+def get_organization():
+    """Get current organization information"""
+    try:
+        org_info = mist.get_organization_info()
+        return jsonify({'success': True, 'data': org_info})
+    except Exception as e:
+        logger.error(f"Error fetching organization info: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/organizations')
 def get_organizations():
     """Get list of organizations (if org_id not specified)"""

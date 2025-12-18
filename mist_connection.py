@@ -58,6 +58,26 @@ class MistConnection:
             logger.error(f"Error auto-detecting org_id: {str(e)}")
             raise
     
+    def get_organization_info(self) -> Dict:
+        """Get current organization information"""
+        try:
+            if not self.org_id:
+                raise ValueError("Organization ID is required")
+            response = mistapi.api.v1.orgs.orgs.getOrg(self.apisession, self.org_id)
+            if response.status_code == 200:
+                data = response.data
+                return {
+                    'org_id': data.get('id'),
+                    'org_name': data.get('name', 'Unknown Organization'),
+                    'created_time': data.get('created_time', 0),
+                    'updated_time': data.get('updated_time', 0)
+                }
+            else:
+                raise Exception(f"API error: {response.status_code}")
+        except Exception as e:
+            logger.error(f"Error getting organization info: {str(e)}")
+            raise
+    
     def get_organizations(self) -> List[Dict]:
         """Get list of organizations the user has access to"""
         try:
@@ -165,6 +185,16 @@ class MistConnection:
                 gw_id = gw.get('id')
                 gw_mac = gw.get('mac')
                 
+                # Get site name - fallback to API call if not in map (pagination issue)
+                gw_site_name = site_map.get(gw_site_id, '')
+                if not gw_site_name and gw_site_id:
+                    try:
+                        site_response = mistapi.api.v1.sites.sites.getSiteInfo(self.apisession, gw_site_id)
+                        if site_response.status_code == 200:
+                            gw_site_name = site_response.data.get('name', '')
+                    except Exception as e:
+                        logger.warning(f"Could not fetch site name for {gw_site_id}: {str(e)}")
+                
                 # Get WAN ports for this gateway
                 wan_ports = wan_ports_by_device.get(gw_mac, [])
                 
@@ -212,14 +242,14 @@ class MistConnection:
                     # Match by description to get IP configuration
                     ip_config = ip_config_by_desc.get(port_desc, {})
                     
-                    # If no match found in config, use empty values
+                    # If no match found in config, assume DHCP (most WAN ports use DHCP)
                     if not ip_config:
                         ip_config = {
                             'description': port_desc,
                             'ip': '',
                             'netmask': '',
                             'gateway': '',
-                            'type': 'unknown',
+                            'type': 'dhcp',  # Default to DHCP for unconfigured ports
                             'override': 'no',
                             'disabled': False
                         }
@@ -259,7 +289,7 @@ class MistConnection:
                     'id': gw_id,
                     'name': gw.get('name', 'Unknown'),
                     'site_id': gw_site_id,
-                    'site_name': site_map.get(gw_site_id, gw.get('site_name', '')),
+                    'site_name': gw_site_name,
                     'model': gw.get('model', ''),
                     'version': gw.get('version', ''),
                     'status': gw.get('status', 'unknown'),
