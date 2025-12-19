@@ -127,7 +127,8 @@ class MistConnection:
             # Fetch all sites with automatic pagination
             response = mistapi.api.v1.orgs.sites.listOrgSites(
                 self.apisession,
-                self.org_id
+                self.org_id,
+                limit=1000
             )
             if response.status_code == 200:
                 # Use get_all to handle pagination automatically
@@ -170,7 +171,8 @@ class MistConnection:
             response = mistapi.api.v1.orgs.inventory.getOrgInventory(
                 self.apisession,
                 self.org_id,
-                type='gateway'
+                type='gateway',
+                limit=1000
             )
             
             if response.status_code == 200:
@@ -296,7 +298,8 @@ class MistConnection:
             device_response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
                 self.apisession,
                 self.org_id,
-                type='gateway'
+                type='gateway',
+                limit=1000
             )
             
             if device_response.status_code != 200:
@@ -313,7 +316,7 @@ class MistConnection:
             # Build a set of gateway MACs for filtering port results
             gateway_macs = {gw.get('mac') for gw in gateways if gw.get('mac')}
             
-            port_params = {}
+            port_params = {'limit': 1000}
             if start is not None:
                 port_params['start'] = start
             if end is not None:
