@@ -124,14 +124,14 @@ class MistConnection:
                 logger.debug("Using cached sites data")
                 return MistConnection._sites_cache
             
-            # Fetch all sites with pagination (limit=1000 should cover most orgs)
+            # Fetch all sites with automatic pagination
             response = mistapi.api.v1.orgs.sites.listOrgSites(
                 self.apisession,
-                self.org_id,
-                limit=1000
+                self.org_id
             )
             if response.status_code == 200:
-                sites = response.data
+                # Use get_all to handle pagination automatically
+                sites = mistapi.get_all(self.apisession, response)
                 result = [{
                     'id': site.get('id'),
                     'name': site.get('name'),
@@ -166,7 +166,7 @@ class MistConnection:
         inventory_data = {}
         
         try:
-            # Use org-level inventory to get device profile IDs for all gateways (1 API call)
+            # Use org-level inventory to get device profile IDs for all gateways (with pagination)
             response = mistapi.api.v1.orgs.inventory.getOrgInventory(
                 self.apisession,
                 self.org_id,
@@ -174,7 +174,8 @@ class MistConnection:
             )
             
             if response.status_code == 200:
-                results = response.data
+                # Use get_all to handle pagination automatically
+                results = mistapi.get_all(self.apisession, response)
                 
                 for device in results:
                     mac = device.get('mac', '')
@@ -291,7 +292,7 @@ class MistConnection:
             sites = self.get_sites()
             site_map = {s['id']: s['name'] for s in sites}
             
-            # Get gateway device stats for basic info (1 API call)
+            # Get gateway device stats for basic info (with pagination)
             device_response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
                 self.apisession,
                 self.org_id,
@@ -301,7 +302,8 @@ class MistConnection:
             if device_response.status_code != 200:
                 raise Exception(f"API error getting device stats: {device_response.status_code}")
             
-            gateways = device_response.data
+            # Use get_all to handle pagination automatically
+            gateways = mistapi.get_all(self.apisession, device_response)
             
             # Get ALL port statistics using org-level endpoint
             # This returns physical port status for all gateways
@@ -324,7 +326,9 @@ class MistConnection:
             )
             
             if port_response.status_code == 200:
-                for port in port_response.data.get('results', []):
+                # Use get_all to handle pagination automatically
+                all_ports = mistapi.get_all(self.apisession, port_response)
+                for port in all_ports:
                     device_mac = port.get('mac')
                     port_id = port.get('port_id', '')
                     
