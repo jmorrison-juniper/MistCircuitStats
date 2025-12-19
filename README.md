@@ -105,14 +105,27 @@ podman run -d -p 5000:5000 --env-file .env ghcr.io/jmorrison-juniper/mistcircuit
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `MIST_APITOKEN` | Yes | - | Your Mist API token |
+| `MIST_APITOKEN` | Yes | - | Mist API token(s) - comma-separated for multiple tokens |
 | `MIST_ORG_ID` | No | Auto-detect | Organization ID |
 | `MIST_HOST` | No | `api.mist.com` | Mist API host |
 | `PORT` | No | `5000` | Web server port |
 | `LOG_LEVEL` | No | `INFO` | Logging level |
 
-### Mist API Hosts
+### Multiple API Tokens (Rate Limit Protection)
 
+To avoid API rate limiting (429 errors), you can configure multiple API tokens. When one token is rate limited, the application automatically switches to the next available token.
+
+```bash
+# Single token
+MIST_APITOKEN=your_token_here
+
+# Multiple tokens (comma-separated)
+MIST_APITOKEN=token1,token2,token3
+```
+
+**Note:** All tokens must have access to the same organization.
+
+### Mist API Hosts
 | Region | Host |
 |--------|------|
 | Global | `api.mist.com` |

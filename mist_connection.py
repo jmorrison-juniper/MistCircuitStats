@@ -19,10 +19,13 @@ class MistConnection:
     _device_profile_cache: Dict[str, Dict] = {}
     _gateway_template_cache: Dict[str, Dict] = {}
     
-    # Rate limiting tracking
-    _rate_limited: bool = False
-    _rate_limit_reset_time: float = 0
+    # Rate limiting tracking (per-token)
+    _rate_limited_tokens: Dict[str, float] = {}  # token -> reset time
     RATE_LIMIT_BACKOFF = 60  # seconds to wait before retrying after 429
+    
+    # Token rotation tracking
+    _all_tokens: List[str] = []
+    _current_token_index: int = 0
     
     # Cache TTLs (in seconds)
     SITES_CACHE_TTL = 300  # 5 minutes
@@ -30,34 +33,110 @@ class MistConnection:
     
     def __init__(self, api_token: str, org_id: Optional[str] = None, host: str = 'api.mist.com'):
         """
-        Initialize Mist API connection
+        Initialize Mist API connection with support for multiple tokens
         
         Args:
-            api_token: Mist API token for authentication
+            api_token: Mist API token(s) - can be comma-separated for multiple tokens
             org_id: Organization ID (optional, will auto-detect if not provided)
             host: Mist API host (default: api.mist.com)
         """
         if not api_token:
             raise ValueError("MIST_APITOKEN environment variable is required")
         
-        self.api_token = api_token
+        # Parse multiple tokens (comma-separated)
+        MistConnection._all_tokens = [t.strip() for t in api_token.split(',') if t.strip()]
+        if not MistConnection._all_tokens:
+            raise ValueError("No valid API tokens provided")
+        
+        logger.info(f"Initialized with {len(MistConnection._all_tokens)} API token(s)")
+        
         self.host = host
         self.org_id = org_id
         
-        # Initialize mistapi session with proper log levels (default is DEBUG which is noisy)
-        # 20 = INFO, 30 = WARNING
-        self.apisession = mistapi.APISession(
-            host=self.host,
-            apitoken=self.api_token,
-            console_log_level=30,  # WARNING - reduce console noise
-            logging_log_level=20   # INFO - reasonable file logging
-        )
+        # Initialize with the first available (non-rate-limited) token
+        self._init_api_session()
         
         # Auto-detect org_id if not provided
         if not self.org_id:
             self._auto_detect_org()
         
         logger.info(f"Initialized Mist connection to {self.host} for org {self.org_id}")
+    
+    def _init_api_session(self):
+        """Initialize or reinitialize the API session with the current token"""
+        self.api_token = self._get_available_token()
+        self.apisession = mistapi.APISession(
+            host=self.host,
+            apitoken=self.api_token,
+            console_log_level=30,  # WARNING - reduce console noise
+            logging_log_level=20   # INFO - reasonable file logging
+        )
+    
+    def _get_available_token(self) -> str:
+        """Get the next available (non-rate-limited) token"""
+        current_time = time.time()
+        
+        # Clean up expired rate limits
+        expired_tokens = [t for t, reset_time in MistConnection._rate_limited_tokens.items() 
+                         if current_time >= reset_time]
+        for token in expired_tokens:
+            del MistConnection._rate_limited_tokens[token]
+            logger.info(f"Token rate limit expired, token available again")
+        
+        # Try to find a non-rate-limited token
+        for i in range(len(MistConnection._all_tokens)):
+            idx = (MistConnection._current_token_index + i) % len(MistConnection._all_tokens)
+            token = MistConnection._all_tokens[idx]
+            if token not in MistConnection._rate_limited_tokens:
+                MistConnection._current_token_index = idx
+                return token
+        
+        # All tokens are rate limited, return the one with the soonest reset
+        if MistConnection._rate_limited_tokens:
+            soonest_token = min(MistConnection._rate_limited_tokens.items(), key=lambda x: x[1])[0]
+            wait_time = MistConnection._rate_limited_tokens[soonest_token] - current_time
+            logger.warning(f"All tokens rate limited. Soonest available in {int(wait_time)}s")
+            return soonest_token
+        
+        # Fallback to current token
+        return MistConnection._all_tokens[MistConnection._current_token_index]
+    
+    def _mark_token_rate_limited(self, token: str = None):
+        """Mark the current token as rate limited and try to switch to another"""
+        token = token or self.api_token
+        reset_time = time.time() + MistConnection.RATE_LIMIT_BACKOFF
+        MistConnection._rate_limited_tokens[token] = reset_time
+        
+        token_num = MistConnection._all_tokens.index(token) + 1 if token in MistConnection._all_tokens else '?'
+        logger.warning(f"Token {token_num}/{len(MistConnection._all_tokens)} rate limited until {int(reset_time)}")
+        
+        # Try to switch to another token
+        if len(MistConnection._all_tokens) > 1:
+            old_token = self.api_token
+            new_token = self._get_available_token()
+            if new_token != old_token and new_token not in MistConnection._rate_limited_tokens:
+                new_token_num = MistConnection._all_tokens.index(new_token) + 1
+                logger.info(f"Switching to token {new_token_num}/{len(MistConnection._all_tokens)}")
+                self.api_token = new_token
+                self.apisession = mistapi.APISession(
+                    host=self.host,
+                    apitoken=self.api_token,
+                    console_log_level=30,
+                    logging_log_level=20
+                )
+                return True  # Successfully switched
+        return False  # No other token available
+    
+    def _is_rate_limited(self) -> bool:
+        """Check if current token is rate limited"""
+        current_time = time.time()
+        if self.api_token in MistConnection._rate_limited_tokens:
+            if current_time < MistConnection._rate_limited_tokens[self.api_token]:
+                return True
+            else:
+                # Rate limit expired
+                del MistConnection._rate_limited_tokens[self.api_token]
+        return False
     
     def _auto_detect_org(self):
         """Auto-detect organization ID from user privileges"""
@@ -363,11 +442,6 @@ class MistConnection:
             
             gateway_stats = []
             
-            # Check class-level rate limit flag and reset if expired
-            current_time = time.time()
-            if MistConnection._rate_limited and current_time >= MistConnection._rate_limit_reset_time:
-                MistConnection._rate_limited = False
-            
             for gw in gateways:
                 # Filter by site if specified
                 if site_id and gw.get('site_id') != site_id:
@@ -401,19 +475,18 @@ class MistConnection:
                 try:
                     # Get device configuration for port_config and gatewaytemplate_id
                     # This is needed per-device but profile fetches are cached
-                    # Skip if we've been rate limited
+                    # Skip if we've been rate limited on all tokens
                     device_config = {}
                     gatewaytemplate_id = None
-                    if gw_site_id and gw_id and not MistConnection._rate_limited:
+                    if gw_site_id and gw_id and not self._is_rate_limited():
                         config_response = mistapi.api.v1.sites.devices.getSiteDevice(
                             self.apisession,
                             gw_site_id,
                             gw_id
                         )
                         if config_response.status_code == 429:
-                            logger.warning("Rate limited (429) - stopping per-device API calls, returning partial data")
-                            MistConnection._rate_limited = True
-                            MistConnection._rate_limit_reset_time = time.time() + MistConnection.RATE_LIMIT_BACKOFF
+                            if not self._mark_token_rate_limited():
+                                logger.warning("All tokens rate limited - returning partial data")
                         elif config_response.status_code == 200:
                             device_config = config_response.data
                             # Use device config's gatewaytemplate_id if not a Hub device
@@ -466,8 +539,8 @@ class MistConnection:
                             }
                     
                     # Get runtime IPs from searchSiteDevices (needed for DHCP IP addresses)
-                    # Skip if we've been rate limited
-                    if gw_site_id and not MistConnection._rate_limited:
+                    # Skip if all tokens are rate limited
+                    if gw_site_id and not self._is_rate_limited():
                         device_search_response = mistapi.api.v1.sites.devices.searchSiteDevices(
                             self.apisession,
                             gw_site_id,
@@ -477,9 +550,8 @@ class MistConnection:
                         )
                         
                         if device_search_response.status_code == 429:
-                            logger.warning("Rate limited (429) - stopping per-device API calls, returning partial data")
-                            MistConnection._rate_limited = True
-                            MistConnection._rate_limit_reset_time = time.time() + MistConnection.RATE_LIMIT_BACKOFF
+                            if not self._mark_token_rate_limited():
+                                logger.warning("All tokens rate limited - returning partial data")
                         elif device_search_response.status_code == 200:
                             search_results = device_search_response.data.get('results', [])
                             if search_results and 'if_stat' in search_results[0]:
@@ -761,20 +833,15 @@ class MistConnection:
             if not self.org_id:
                 raise ValueError("Organization ID is required")
             
-            # Check if we're currently rate limited
-            current_time = time.time()
-            if MistConnection._rate_limited:
-                if current_time < MistConnection._rate_limit_reset_time:
-                    logger.debug(f"Skipping VPN peer stats - rate limited for {int(MistConnection._rate_limit_reset_time - current_time)}s")
-                    return {
-                        'success': False,
-                        'rate_limited': True,
-                        'peers_by_port': {},
-                        'total_peers': 0
-                    }
-                else:
-                    # Reset rate limit flag
-                    MistConnection._rate_limited = False
+            # Check if we're currently rate limited on all tokens
+            if self._is_rate_limited():
+                logger.debug(f"Skipping VPN peer stats - all tokens rate limited")
+                return {
+                    'success': False,
+                    'rate_limited': True,
+                    'peers_by_port': {},
+                    'total_peers': 0
+                }
             
             headers = {
                 'Authorization': f'Token {self.api_token}',
@@ -790,17 +857,24 @@ class MistConnection:
             response = requests.get(url, headers=headers, params=params)
             
             if response.status_code == 429:
-                # Set rate limit flag
-                MistConnection._rate_limited = True
-                MistConnection._rate_limit_reset_time = current_time + MistConnection.RATE_LIMIT_BACKOFF
-                logger.warning(f"Rate limited (429) - backing off for {MistConnection.RATE_LIMIT_BACKOFF}s")
-                return {
-                    'success': False,
-                    'rate_limited': True,
-                    'peers_by_port': {},
-                    'total_peers': 0
-                }
-            elif response.status_code == 200:
+                # Mark token as rate limited and try to switch
+                switched = self._mark_token_rate_limited()
+                if switched:
+                    # Retry with new token
+                    headers['Authorization'] = f'Token {self.api_token}'
+                    response = requests.get(url, headers=headers, params=params)
+                    if response.status_code == 429:
+                        self._mark_token_rate_limited()
+                
+                if response.status_code != 200:
+                    return {
+                        'success': False,
+                        'rate_limited': True,
+                        'peers_by_port': {},
+                        'total_peers': 0
+                    }
+            
+            if response.status_code == 200:
                 data = response.json()
                 results = data.get('results', [])
                 
