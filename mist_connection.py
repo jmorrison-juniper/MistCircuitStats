@@ -39,10 +39,13 @@ class MistConnection:
         self.host = host
         self.org_id = org_id
         
-        # Initialize mistapi session
+        # Initialize mistapi session with proper log levels (default is DEBUG which is noisy)
+        # 20 = INFO, 30 = WARNING
         self.apisession = mistapi.APISession(
             host=self.host,
-            apitoken=self.api_token
+            apitoken=self.api_token,
+            console_log_level=30,  # WARNING - reduce console noise
+            logging_log_level=20   # INFO - reasonable file logging
         )
         
         # Auto-detect org_id if not provided
