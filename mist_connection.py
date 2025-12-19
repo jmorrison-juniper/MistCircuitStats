@@ -138,10 +138,29 @@ class MistConnection:
                 del MistConnection._rate_limited_tokens[self.api_token]
         return False
     
+    def _handle_rate_limit_response(self, response) -> bool:
+        """
+        Check response for 429 rate limit and handle token rotation.
+        
+        Returns:
+            True if rate limited (caller should handle), False if OK to proceed
+        """
+        if response.status_code == 429:
+            switched = self._mark_token_rate_limited()
+            if switched:
+                logger.info("Switched to new token after 429")
+            else:
+                logger.warning("All tokens rate limited")
+            return True
+        return False
+    
     def _auto_detect_org(self):
         """Auto-detect organization ID from user privileges"""
         try:
             response = mistapi.api.v1.self.self.getSelf(self.apisession)
+            if self._handle_rate_limit_response(response):
+                # Retry with new token
+                response = mistapi.api.v1.self.self.getSelf(self.apisession)
             if response.status_code == 200:
                 data = response.data
                 # Get first org from privileges
@@ -162,6 +181,8 @@ class MistConnection:
             if not self.org_id:
                 raise ValueError("Organization ID is required")
             response = mistapi.api.v1.orgs.orgs.getOrg(self.apisession, self.org_id)
+            if self._handle_rate_limit_response(response):
+                response = mistapi.api.v1.orgs.orgs.getOrg(self.apisession, self.org_id)
             if response.status_code == 200:
                 data = response.data
                 return {
@@ -180,6 +201,8 @@ class MistConnection:
         """Get list of organizations the user has access to"""
         try:
             response = mistapi.api.v1.self.self.getSelf(self.apisession)
+            if self._handle_rate_limit_response(response):
+                response = mistapi.api.v1.self.self.getSelf(self.apisession)
             if response.status_code == 200:
                 data = response.data
                 orgs = []
@@ -217,6 +240,12 @@ class MistConnection:
                 self.org_id,
                 limit=1000
             )
+            if self._handle_rate_limit_response(response):
+                response = mistapi.api.v1.orgs.sites.listOrgSites(
+                    self.apisession,
+                    self.org_id,
+                    limit=1000
+                )
             if response.status_code == 200:
                 # Use get_all to handle pagination automatically
                 sites = mistapi.get_all(self.apisession, response)
@@ -261,6 +290,14 @@ class MistConnection:
                 type='gateway',
                 limit=1000
             )
+            
+            if self._handle_rate_limit_response(response):
+                response = mistapi.api.v1.orgs.inventory.getOrgInventory(
+                    self.apisession,
+                    self.org_id,
+                    type='gateway',
+                    limit=1000
+                )
             
             if response.status_code == 200:
                 # Use get_all to handle pagination automatically
@@ -309,6 +346,12 @@ class MistConnection:
                 self.org_id,
                 deviceprofile_id
             )
+            if self._handle_rate_limit_response(response):
+                response = mistapi.api.v1.orgs.deviceprofiles.getOrgDeviceProfile(
+                    self.apisession,
+                    self.org_id,
+                    deviceprofile_id
+                )
             if response.status_code == 200:
                 MistConnection._device_profile_cache[cache_key] = response.data
                 logger.debug(f"Fetched and cached device profile {deviceprofile_id}: {response.data.get('name', 'unknown')}")
@@ -342,6 +385,12 @@ class MistConnection:
                 self.org_id,
                 gatewaytemplate_id
             )
+            if self._handle_rate_limit_response(response):
+                response = mistapi.api.v1.orgs.gatewaytemplates.getOrgGatewayTemplate(
+                    self.apisession,
+                    self.org_id,
+                    gatewaytemplate_id
+                )
             if response.status_code == 200:
                 MistConnection._gateway_template_cache[cache_key] = response.data
                 logger.debug(f"Fetched and cached gateway template {gatewaytemplate_id}: {response.data.get('name', 'unknown')}")
@@ -389,6 +438,14 @@ class MistConnection:
                 limit=1000
             )
             
+            if self._handle_rate_limit_response(device_response):
+                device_response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
+                    self.apisession,
+                    self.org_id,
+                    type='gateway',
+                    limit=1000
+                )
+            
             if device_response.status_code != 200:
                 raise Exception(f"API error getting device stats: {device_response.status_code}")
             
@@ -414,6 +471,13 @@ class MistConnection:
                 self.org_id,
                 **port_params
             )
+            
+            if self._handle_rate_limit_response(port_response):
+                port_response = mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts(
+                    self.apisession,
+                    self.org_id,
+                    **port_params
+                )
             
             if port_response.status_code == 200:
                 # Use get_all to handle pagination automatically
@@ -782,6 +846,14 @@ class MistConnection:
                 type='gateway',
                 mac=gateway_id
             )
+            
+            if self._handle_rate_limit_response(response):
+                response = mistapi.api.v1.orgs.devices.searchOrgDevices(
+                    self.apisession,
+                    self.org_id,
+                    type='gateway',
+                    mac=gateway_id
+                )
             
             if response.status_code == 200:
                 gw = response.data
