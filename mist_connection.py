@@ -357,6 +357,7 @@ class MistConnection:
             inventory_map = self._batch_fetch_inventory(gateway_macs)
             
             gateway_stats = []
+            rate_limited = False  # Flag to stop making per-device API calls if rate limited
             
             for gw in gateways:
                 # Filter by site if specified
@@ -391,15 +392,19 @@ class MistConnection:
                 try:
                     # Get device configuration for port_config and gatewaytemplate_id
                     # This is needed per-device but profile fetches are cached
+                    # Skip if we've been rate limited
                     device_config = {}
                     gatewaytemplate_id = None
-                    if gw_site_id and gw_id:
+                    if gw_site_id and gw_id and not rate_limited:
                         config_response = mistapi.api.v1.sites.devices.getSiteDevice(
                             self.apisession,
                             gw_site_id,
                             gw_id
                         )
-                        if config_response.status_code == 200:
+                        if config_response.status_code == 429:
+                            logger.warning("Rate limited (429) - stopping per-device API calls, returning partial data")
+                            rate_limited = True
+                        elif config_response.status_code == 200:
                             device_config = config_response.data
                             # Use device config's gatewaytemplate_id if not a Hub device
                             if not deviceprofile_id:
@@ -451,7 +456,8 @@ class MistConnection:
                             }
                     
                     # Get runtime IPs from searchSiteDevices (needed for DHCP IP addresses)
-                    if gw_site_id:
+                    # Skip if we've been rate limited
+                    if gw_site_id and not rate_limited:
                         device_search_response = mistapi.api.v1.sites.devices.searchSiteDevices(
                             self.apisession,
                             gw_site_id,
@@ -460,7 +466,10 @@ class MistConnection:
                             stats=True
                         )
                         
-                        if device_search_response.status_code == 200:
+                        if device_search_response.status_code == 429:
+                            logger.warning("Rate limited (429) - stopping per-device API calls, returning partial data")
+                            rate_limited = True
+                        elif device_search_response.status_code == 200:
                             search_results = device_search_response.data.get('results', [])
                             if search_results and 'if_stat' in search_results[0]:
                                 if_stat = search_results[0]['if_stat']
