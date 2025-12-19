@@ -19,6 +19,11 @@ class MistConnection:
     _device_profile_cache: Dict[str, Dict] = {}
     _gateway_template_cache: Dict[str, Dict] = {}
     
+    # Rate limiting tracking
+    _rate_limited: bool = False
+    _rate_limit_reset_time: float = 0
+    RATE_LIMIT_BACKOFF = 60  # seconds to wait before retrying after 429
+    
     # Cache TTLs (in seconds)
     SITES_CACHE_TTL = 300  # 5 minutes
     PROFILE_CACHE_TTL = 600  # 10 minutes
@@ -357,7 +362,11 @@ class MistConnection:
             inventory_map = self._batch_fetch_inventory(gateway_macs)
             
             gateway_stats = []
-            rate_limited = False  # Flag to stop making per-device API calls if rate limited
+            
+            # Check class-level rate limit flag and reset if expired
+            current_time = time.time()
+            if MistConnection._rate_limited and current_time >= MistConnection._rate_limit_reset_time:
+                MistConnection._rate_limited = False
             
             for gw in gateways:
                 # Filter by site if specified
@@ -395,7 +404,7 @@ class MistConnection:
                     # Skip if we've been rate limited
                     device_config = {}
                     gatewaytemplate_id = None
-                    if gw_site_id and gw_id and not rate_limited:
+                    if gw_site_id and gw_id and not MistConnection._rate_limited:
                         config_response = mistapi.api.v1.sites.devices.getSiteDevice(
                             self.apisession,
                             gw_site_id,
@@ -403,7 +412,8 @@ class MistConnection:
                         )
                         if config_response.status_code == 429:
                             logger.warning("Rate limited (429) - stopping per-device API calls, returning partial data")
-                            rate_limited = True
+                            MistConnection._rate_limited = True
+                            MistConnection._rate_limit_reset_time = time.time() + MistConnection.RATE_LIMIT_BACKOFF
                         elif config_response.status_code == 200:
                             device_config = config_response.data
                             # Use device config's gatewaytemplate_id if not a Hub device
@@ -457,7 +467,7 @@ class MistConnection:
                     
                     # Get runtime IPs from searchSiteDevices (needed for DHCP IP addresses)
                     # Skip if we've been rate limited
-                    if gw_site_id and not rate_limited:
+                    if gw_site_id and not MistConnection._rate_limited:
                         device_search_response = mistapi.api.v1.sites.devices.searchSiteDevices(
                             self.apisession,
                             gw_site_id,
@@ -468,7 +478,8 @@ class MistConnection:
                         
                         if device_search_response.status_code == 429:
                             logger.warning("Rate limited (429) - stopping per-device API calls, returning partial data")
-                            rate_limited = True
+                            MistConnection._rate_limited = True
+                            MistConnection._rate_limit_reset_time = time.time() + MistConnection.RATE_LIMIT_BACKOFF
                         elif device_search_response.status_code == 200:
                             search_results = device_search_response.data.get('results', [])
                             if search_results and 'if_stat' in search_results[0]:
@@ -750,6 +761,21 @@ class MistConnection:
             if not self.org_id:
                 raise ValueError("Organization ID is required")
             
+            # Check if we're currently rate limited
+            current_time = time.time()
+            if MistConnection._rate_limited:
+                if current_time < MistConnection._rate_limit_reset_time:
+                    logger.debug(f"Skipping VPN peer stats - rate limited for {int(MistConnection._rate_limit_reset_time - current_time)}s")
+                    return {
+                        'success': False,
+                        'rate_limited': True,
+                        'peers_by_port': {},
+                        'total_peers': 0
+                    }
+                else:
+                    # Reset rate limit flag
+                    MistConnection._rate_limited = False
+            
             headers = {
                 'Authorization': f'Token {self.api_token}',
                 'Content-Type': 'application/json'
@@ -763,7 +789,18 @@ class MistConnection:
             
             response = requests.get(url, headers=headers, params=params)
             
-            if response.status_code == 200:
+            if response.status_code == 429:
+                # Set rate limit flag
+                MistConnection._rate_limited = True
+                MistConnection._rate_limit_reset_time = current_time + MistConnection.RATE_LIMIT_BACKOFF
+                logger.warning(f"Rate limited (429) - backing off for {MistConnection.RATE_LIMIT_BACKOFF}s")
+                return {
+                    'success': False,
+                    'rate_limited': True,
+                    'peers_by_port': {},
+                    'total_peers': 0
+                }
+            elif response.status_code == 200:
                 data = response.json()
                 results = data.get('results', [])
                 
