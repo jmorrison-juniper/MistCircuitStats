@@ -420,10 +420,28 @@
 
         <!-- Loading State -->
         <div id="loadingState" class="loading">
-            <div class="spinner-border" role="status">
+            <div class="spinner-border spinner-border-lg mb-3" role="status" style="width: 3rem; height: 3rem;">
                 <span class="visually-hidden">Loading...</span>
             </div>
-            <p class="mt-3">Loading gateway statistics...</p>
+            <h5 class="mb-2">Loading Gateway Statistics</h5>
+            <p class="text-muted mb-3" id="loadingMessage">Connecting to Mist API...</p>
+            
+            <!-- Progress bar -->
+            <div class="progress mb-3" style="height: 8px; max-width: 400px; margin: 0 auto; background-color: #404040;">
+                <div id="loadingProgress" class="progress-bar progress-bar-striped progress-bar-animated" 
+                     role="progressbar" style="width: 0%; background-color: var(--tmobile-magenta);" 
+                     aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+            </div>
+            
+            <!-- Elapsed time and gateway count -->
+            <div class="d-flex justify-content-center gap-4 text-muted small">
+                <span><i class="bi bi-clock"></i> Elapsed: <span id="loadingElapsed">0:00</span></span>
+                <span><i class="bi bi-router"></i> Gateways: <span id="loadingGatewayCount">-</span></span>
+            </div>
+            
+            <p class="text-muted small mt-3 mb-0">
+                <i class="bi bi-info-circle"></i> Large organizations may take several minutes to load
+            </p>
         </div>
 
         <!-- Gateway Table -->
@@ -539,8 +557,75 @@
         let currentChartContext = null;  // Store current chart context for filtering
         let currentChartViewDuration = '7d';  // Current view in the chart modal
         
+        // Loading progress tracking
+        let loadingStartTime = null;
+        let loadingTimerInterval = null;
+        let loadingProgressInterval = null;
+        
+        function startLoadingProgress() {
+            loadingStartTime = Date.now();
+            let progress = 0;
+            const phases = [
+                { pct: 10, msg: 'Connecting to Mist API...' },
+                { pct: 20, msg: 'Fetching organization info...' },
+                { pct: 30, msg: 'Loading site list...' },
+                { pct: 40, msg: 'Retrieving gateway inventory...' },
+                { pct: 50, msg: 'Fetching device statistics...' },
+                { pct: 60, msg: 'Loading port configurations...' },
+                { pct: 70, msg: 'Processing gateway data...' },
+                { pct: 80, msg: 'Fetching VPN peer paths...' },
+                { pct: 90, msg: 'Finalizing data...' }
+            ];
+            let phaseIndex = 0;
+            
+            // Update elapsed time every second
+            loadingTimerInterval = setInterval(() => {
+                const elapsed = Math.floor((Date.now() - loadingStartTime) / 1000);
+                const minutes = Math.floor(elapsed / 60);
+                const seconds = elapsed % 60;
+                document.getElementById('loadingElapsed').textContent = 
+                    `${minutes}:${seconds.toString().padStart(2, '0')}`;
+            }, 1000);
+            
+            // Animate progress bar with phases
+            loadingProgressInterval = setInterval(() => {
+                if (phaseIndex < phases.length && progress < phases[phaseIndex].pct) {
+                    progress += 1;
+                    document.getElementById('loadingProgress').style.width = progress + '%';
+                    document.getElementById('loadingProgress').setAttribute('aria-valuenow', progress);
+                } else if (phaseIndex < phases.length) {
+                    document.getElementById('loadingMessage').textContent = phases[phaseIndex].msg;
+                    phaseIndex++;
+                }
+                
+                // Slow down progress after 70% to simulate waiting for API
+                if (progress >= 70 && progress < 95) {
+                    progress += 0.2;
+                    document.getElementById('loadingProgress').style.width = progress + '%';
+                }
+            }, 300);
+        }
+        
+        function stopLoadingProgress(gatewayCount) {
+            if (loadingTimerInterval) {
+                clearInterval(loadingTimerInterval);
+                loadingTimerInterval = null;
+            }
+            if (loadingProgressInterval) {
+                clearInterval(loadingProgressInterval);
+                loadingProgressInterval = null;
+            }
+            
+            // Complete the progress bar
+            document.getElementById('loadingProgress').style.width = '100%';
+            document.getElementById('loadingProgress').setAttribute('aria-valuenow', 100);
+            document.getElementById('loadingMessage').textContent = `Loaded ${gatewayCount} gateways`;
+            document.getElementById('loadingGatewayCount').textContent = gatewayCount;
+        }
+        
         // Initialize on page load
         document.addEventListener('DOMContentLoaded', function() {
+            startLoadingProgress();
             loadData();
             
             // Setup search
@@ -574,15 +659,22 @@
                 
                 if (gatewaysData.success) {
                     allGateways = gatewaysData.data;
+                    stopLoadingProgress(allGateways.length);
                     updateStats();
                     renderGateways(allGateways);
-                    document.getElementById('loadingState').style.display = 'none';
-                    document.getElementById('gatewayContainer').style.display = 'block';
+                    
+                    // Brief delay to show completion before hiding
+                    setTimeout(() => {
+                        document.getElementById('loadingState').style.display = 'none';
+                        document.getElementById('gatewayContainer').style.display = 'block';
+                    }, 500);
                 } else {
+                    stopLoadingProgress(0);
                     showToast('Error loading data: ' + gatewaysData.error, 'danger');
                 }
             } catch (error) {
                 console.error('Error:', error);
+                stopLoadingProgress(0);
                 showToast('Error loading data: ' + error.message, 'danger');
             }
         }
@@ -763,8 +855,8 @@
         function refreshData() {
             document.getElementById('loadingState').style.display = 'block';
             document.getElementById('gatewayContainer').style.display = 'none';
+            startLoadingProgress();
             loadData();
-            showToast('Data refreshed successfully', 'success');
         }
         
         function downloadCSV() {
