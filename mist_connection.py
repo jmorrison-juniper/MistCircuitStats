@@ -501,23 +501,21 @@ class MistConnection:
             # Build a set of gateway MACs for filtering port results
             gateway_macs = {gw.get('mac') for gw in gateways if gw.get('mac')}
             
-            port_params = {'limit': 1000}
-            if start is not None:
-                port_params['start'] = start
-            if end is not None:
-                port_params['end'] = end
-            
+            # searchOrgSwOrGwPorts returns current cumulative port counters (not a
+            # time-range aggregate). The SDK no longer accepts start/end kwargs; the
+            # provided window is used elsewhere for time-series charts, not for the
+            # gateway-list snapshot rendered here.
             port_response = mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts(
                 self.apisession,
                 self.org_id,
-                **port_params
+                limit=1000,
             )
-            
+
             if self._handle_rate_limit_response(port_response):
                 port_response = mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts(
                     self.apisession,
                     self.org_id,
-                    **port_params
+                    limit=1000,
                 )
             
             if port_response.status_code == 200:
@@ -746,8 +744,7 @@ class MistConnection:
                         if netmask.startswith('/'):
                             netmask = netmask[1:]
                     
-                    # Use cumulative stats from org-level port search (no per-port API calls)
-                    # The searchOrgSwOrGwPorts endpoint provides traffic data for the time range
+                    # Cumulative counters from org-level port search (current-state snapshot).
                     rx_bytes = port.get('rx_bytes', 0)
                     tx_bytes = port.get('tx_bytes', 0)
                     
