@@ -867,38 +867,66 @@ class MistConnection:
     def get_gateway_port_stats(self, gateway_id: str) -> Dict:
         """
         Get detailed port statistics for a specific gateway
-        
+
         Args:
-            gateway_id: Gateway device ID
-            
+            gateway_id: Gateway device ID (Mist composite UUID)
+
         Returns:
             Detailed port statistics
         """
         try:
-            # Get gateway stats using search devices endpoint
             if not self.org_id:
                 raise ValueError("Organization ID is required")
-            response = mistapi.api.v1.orgs.devices.searchOrgDevices(
+
+            # Mist device_id is the composite UUID (00000000-0000-0000-1000-<mac>).
+            # listOrgDevicesStats returns id/name/site_id/mac reliably and accepts
+            # the 12-char mac suffix as a filter (searchOrgDevices does too, but
+            # its payload lacks id/name for SSR).
+            mac_filter = gateway_id.replace('-', '')[-12:] if gateway_id else gateway_id
+            response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
                 self.apisession,
                 self.org_id,
                 type='gateway',
-                mac=gateway_id
+                mac=mac_filter,
             )
-            
+
             if self._handle_rate_limit_response(response):
-                response = mistapi.api.v1.orgs.devices.searchOrgDevices(
+                response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
                     self.apisession,
                     self.org_id,
                     type='gateway',
-                    mac=gateway_id
+                    mac=mac_filter,
                 )
-            
-            if response.status_code == 200:
-                gw = response.data
-                port_stats = {}
-                
-                if 'port_stat' in gw:
-                    for port_name, port_data in gw['port_stat'].items():
+
+            if response.status_code != 200:
+                raise Exception(f"API error: {response.status_code}")
+
+            results = response.data if isinstance(response.data, list) else []
+            gw = results[0] if results else {}
+            gateway_name = gw.get('name') or gw.get('hostname') or 'Unknown'
+            site_id = gw.get('site_id')
+            resolved_id = gw.get('id') or gateway_id
+
+            # Fetch port_stat / if_stat from the site-scoped device stats endpoint.
+            port_stats = {}
+            timestamp = 0
+            if site_id and resolved_id:
+                port_resp = mistapi.api.v1.sites.stats.getSiteDeviceStats(
+                    self.apisession, site_id, resolved_id
+                )
+                if self._handle_rate_limit_response(port_resp):
+                    port_resp = mistapi.api.v1.sites.stats.getSiteDeviceStats(
+                        self.apisession, site_id, resolved_id
+                    )
+                if port_resp.status_code == 200 and isinstance(port_resp.data, dict):
+                    dev = port_resp.data
+                    timestamp = dev.get('last_seen', 0) or 0
+                    # SSR gateways expose per-interface stats under `if_stat`; SRX
+                    # style gateways historically used `port_stat`.
+                    raw_ports = dev.get('port_stat') or dev.get('if_stat') or {}
+                    for port_name, port_data in raw_ports.items():
+                        if not isinstance(port_data, dict):
+                            continue
                         port_stats[port_name] = {
                             'up': port_data.get('up', False),
                             'rx_bytes': port_data.get('rx_bytes', 0),
@@ -911,17 +939,15 @@ class MistConnection:
                             'tx_bps': port_data.get('tx_bps', 0),
                             'speed': port_data.get('speed', 0),
                             'mac': port_data.get('mac', ''),
-                            'full_duplex': port_data.get('full_duplex', True)
+                            'full_duplex': port_data.get('full_duplex', True),
                         }
-                
-                return {
-                    'gateway_id': gw.get('id'),
-                    'gateway_name': gw.get('name', 'Unknown'),
-                    'ports': port_stats,
-                    'timestamp': gw.get('last_seen', 0)
-                }
-            else:
-                raise Exception(f"API error: {response.status_code}")
+
+            return {
+                'gateway_id': resolved_id,
+                'gateway_name': gateway_name,
+                'ports': port_stats,
+                'timestamp': timestamp,
+            }
         except Exception as e:
             logger.error(f"Error getting gateway port stats: {str(e)}")
             raise
