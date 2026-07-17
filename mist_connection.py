@@ -4,10 +4,51 @@ Handles all interactions with the Juniper Mist API using mistapi SDK
 """
 import logging
 import time
-from typing import List, Dict, Optional
+from datetime import datetime, timezone
+from typing import List, Dict, Optional, Tuple
 import mistapi
 
 logger = logging.getLogger(__name__)
+
+# WAN Insights feature — module-level helpers (T005/T006)
+RETENTION_DAYS = 14
+RETENTION_SECONDS = RETENTION_DAYS * 86400
+HOUR_INTERVAL = 3600
+
+_DURATION_MAP = {
+    '24h': 24 * 3600,
+    '3d': 3 * 86400,
+    '7d': 7 * 86400,
+}
+
+
+def duration_to_seconds(duration: str) -> int:
+    """Map an allow-listed duration token to seconds. Raises ValueError otherwise."""
+    if duration not in _DURATION_MAP:
+        raise ValueError(f"duration must be one of: {', '.join(_DURATION_MAP.keys())}")
+    return _DURATION_MAP[duration]
+
+
+def clip_to_retention_window(start: int, end: int, retention_days: int = RETENTION_DAYS) -> Tuple[int, bool, str]:
+    """Clip requested start to (end - retention). Returns (clamped_start, clipped_flag, notice)."""
+    retention = retention_days * 86400
+    earliest = end - retention
+    if start < earliest:
+        clamped_start = earliest
+        clipped = True
+        start_iso = datetime.fromtimestamp(clamped_start, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        end_iso = datetime.fromtimestamp(end, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        notice = (
+            f"Data range clipped to the API's {retention_days}-day 1h-interval retention window "
+            f"(from {start_iso} to {end_iso})."
+        )
+        return clamped_start, clipped, notice
+    return start, False, ""
+
+
+def hour_iso(ts: int) -> str:
+    """Render a UTC epoch second as YYYY-MM-DDTHH:00:00Z hour-bucket ISO."""
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%dT%H:00:00Z')
 
 
 class MistConnection:
@@ -991,3 +1032,328 @@ class MistConnection:
                 'peers_by_port': {},
                 'total_peers': 0
             }
+
+    # ------------------------------------------------------------------
+    # WAN Insights feature — hourly bandwidth, wan_link_health, App Health SLE
+    # ------------------------------------------------------------------
+
+    def _insights_gateway_stats(self, site_id: str, device_id: str, port_id: str,
+                                start: int, end: int, metrics: str) -> Dict:
+        """
+        Shared helper: GET /api/v1/sites/{site_id}/insights/gateway/{device_id}/stats
+        with port_id filter and 1h interval. Returns
+            {'success': bool, 'rate_limited': bool, 'data': dict-or-None}
+        Never raises for 429; funnels through _mark_token_rate_limited.
+        """
+        import requests
+
+        if self._is_rate_limited():
+            return {'success': False, 'rate_limited': True, 'data': None}
+
+        headers = {
+            'Authorization': f'Token {self.api_token}',
+            'Content-Type': 'application/json'
+        }
+        url = f'https://{self.host}/api/v1/sites/{site_id}/insights/gateway/{device_id}/stats'
+        params = {
+            'metrics': metrics,
+            'port_id': port_id,
+            'interval': '1h',
+            'start': start,
+            'end': end,
+        }
+
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=60)
+
+            if response.status_code == 429:
+                switched = self._mark_token_rate_limited()
+                if switched:
+                    headers['Authorization'] = f'Token {self.api_token}'
+                    response = requests.get(url, headers=headers, params=params, timeout=60)
+                    if response.status_code == 429:
+                        self._mark_token_rate_limited()
+
+                if response.status_code != 200:
+                    return {'success': False, 'rate_limited': True, 'data': None}
+
+            if response.status_code == 200:
+                return {'success': True, 'rate_limited': False, 'data': response.json()}
+
+            logger.warning(f"insights/gateway stats {response.status_code} metrics={metrics} port={port_id}")
+            return {'success': False, 'rate_limited': False, 'data': None}
+        except Exception as e:
+            logger.warning(f"insights/gateway stats error metrics={metrics} port={port_id}: {e}")
+            return {'success': False, 'rate_limited': False, 'data': None}
+
+    def get_gateway_hourly_bandwidth(self, site_id: str, device_id: str, port_id: str,
+                                     start: int, end: int) -> Dict:
+        """
+        Return hourly Rx/Tx bandwidth for one WAN port.
+
+        Wraps GET /insights/gateway/{device_id}/stats?metrics=tx_bps,rx_bps,max_tx_bps,max_rx_bps
+        Returns:
+            {
+              'success': bool,
+              'rate_limited': bool,
+              'samples': [
+                {'timestamp': int, 'hour_iso': str,
+                 'tx_bps': float|None, 'rx_bps': float|None,
+                 'max_tx_bps': float|None, 'max_rx_bps': float|None},
+                ...
+              ]
+            }
+        """
+        result = self._insights_gateway_stats(
+            site_id, device_id, port_id, start, end,
+            metrics='tx_bps,rx_bps,max_tx_bps,max_rx_bps'
+        )
+        if not result['success']:
+            return {
+                'success': False,
+                'rate_limited': result['rate_limited'],
+                'samples': []
+            }
+
+        data = result['data'] or {}
+        # Mist insights stats return per-metric arrays aligned by index; also
+        # commonly exposes 'start' and 'interval' at the envelope level.
+        interval = data.get('interval', HOUR_INTERVAL) or HOUR_INTERVAL
+        env_start = data.get('start', start)
+        tx = data.get('tx_bps', []) or []
+        rx = data.get('rx_bps', []) or []
+        max_tx = data.get('max_tx_bps', []) or []
+        max_rx = data.get('max_rx_bps', []) or []
+        n = max(len(tx), len(rx), len(max_tx), len(max_rx))
+
+        samples = []
+        for i in range(n):
+            ts = int(env_start + i * interval)
+            samples.append({
+                'timestamp': ts,
+                'hour_iso': hour_iso(ts),
+                'tx_bps': tx[i] if i < len(tx) else None,
+                'rx_bps': rx[i] if i < len(rx) else None,
+                'max_tx_bps': max_tx[i] if i < len(max_tx) else None,
+                'max_rx_bps': max_rx[i] if i < len(max_rx) else None,
+            })
+
+        return {'success': True, 'rate_limited': False, 'samples': samples}
+
+    def get_gateway_hourly_wan_link_health(self, site_id: str, device_id: str, port_id: str,
+                                           start: int, end: int) -> Dict:
+        """
+        Return hourly jitter/latency/loss for one WAN port via the native
+        wan_link_health insight metric. No fanout, no rollup, no peer_count.
+
+        Returns:
+            {
+              'success': bool,
+              'rate_limited': bool,
+              'samples': [
+                {'timestamp': int, 'hour_iso': str,
+                 'avg_latency_ms': float|None,
+                 'avg_jitter_ms': float|None,
+                 'avg_loss_pct': float|None},
+                ...
+              ]
+            }
+        """
+        result = self._insights_gateway_stats(
+            site_id, device_id, port_id, start, end,
+            metrics='wan_link_health'
+        )
+        if not result['success']:
+            return {
+                'success': False,
+                'rate_limited': result['rate_limited'],
+                'samples': []
+            }
+
+        data = result['data'] or {}
+        interval = data.get('interval', HOUR_INTERVAL) or HOUR_INTERVAL
+        env_start = data.get('start', start)
+
+        # wan_link_health typically arrives as either:
+        #   {'wan_link_health': [{'latency':..,'jitter':..,'loss':..}, ...]}
+        # or flattened per-metric arrays under nested keys. Support both.
+        wlh = data.get('wan_link_health')
+        latency_arr, jitter_arr, loss_arr = [], [], []
+
+        if isinstance(wlh, list):
+            for entry in wlh:
+                if isinstance(entry, dict):
+                    latency_arr.append(entry.get('latency'))
+                    jitter_arr.append(entry.get('jitter'))
+                    loss_arr.append(entry.get('loss'))
+                else:
+                    latency_arr.append(None)
+                    jitter_arr.append(None)
+                    loss_arr.append(None)
+        elif isinstance(wlh, dict):
+            latency_arr = wlh.get('latency', []) or []
+            jitter_arr = wlh.get('jitter', []) or []
+            loss_arr = wlh.get('loss', []) or []
+        else:
+            # Fallback: metric-per-array at the top level
+            latency_arr = data.get('latency', []) or []
+            jitter_arr = data.get('jitter', []) or []
+            loss_arr = data.get('loss', []) or []
+
+        n = max(len(latency_arr), len(jitter_arr), len(loss_arr))
+        samples = []
+        for i in range(n):
+            ts = int(env_start + i * interval)
+            samples.append({
+                'timestamp': ts,
+                'hour_iso': hour_iso(ts),
+                'avg_latency_ms': latency_arr[i] if i < len(latency_arr) else None,
+                'avg_jitter_ms': jitter_arr[i] if i < len(jitter_arr) else None,
+                'avg_loss_pct': loss_arr[i] if i < len(loss_arr) else None,
+            })
+
+        return {'success': True, 'rate_limited': False, 'samples': samples}
+
+    def _sle_app_health_get(self, site_id: str, sub_path: str, params: Optional[Dict] = None) -> Dict:
+        """
+        Shared helper: GET /api/v1/sites/{site_id}/sle/site/{site_id}/metric/application-health/{sub_path}
+        Returns {'success': bool, 'rate_limited': bool, 'data': dict|list|None}.
+        """
+        import requests
+
+        if self._is_rate_limited():
+            return {'success': False, 'rate_limited': True, 'data': None}
+
+        headers = {
+            'Authorization': f'Token {self.api_token}',
+            'Content-Type': 'application/json'
+        }
+        url = (
+            f'https://{self.host}/api/v1/sites/{site_id}'
+            f'/sle/site/{site_id}/metric/application-health/{sub_path}'
+        )
+
+        try:
+            response = requests.get(url, headers=headers, params=params or {}, timeout=60)
+
+            if response.status_code == 429:
+                switched = self._mark_token_rate_limited()
+                if switched:
+                    headers['Authorization'] = f'Token {self.api_token}'
+                    response = requests.get(url, headers=headers, params=params or {}, timeout=60)
+                    if response.status_code == 429:
+                        self._mark_token_rate_limited()
+
+                if response.status_code != 200:
+                    return {'success': False, 'rate_limited': True, 'data': None}
+
+            if response.status_code == 200:
+                try:
+                    return {'success': True, 'rate_limited': False, 'data': response.json()}
+                except ValueError:
+                    return {'success': True, 'rate_limited': False, 'data': None}
+
+            # 400 or other = unavailable, treat as no-data (spec: return HTTP 200 unavailable case)
+            logger.info(f"App Health SLE {sub_path} returned {response.status_code} for site {site_id}")
+            return {'success': False, 'rate_limited': False, 'data': None}
+        except Exception as e:
+            logger.warning(f"App Health SLE {sub_path} error site {site_id}: {e}")
+            return {'success': False, 'rate_limited': False, 'data': None}
+
+    def get_site_application_health(self, site_id: str, start: int, end: int) -> Dict:
+        """
+        Fetch the native Mist Application Health SLE (SSR) for a site.
+
+        Calls four sub-endpoints sequentially:
+          - summary            -> summary_pct
+          - summary-trend      -> trend[]  (hourly)
+          - impacted-interfaces -> impacted_interfaces[]
+          - threshold          -> threshold_pct
+
+        Returns:
+            {
+              'success': bool,
+              'rate_limited': bool,
+              'site_id': str,
+              'summary_pct': float|None,
+              'threshold_pct': float|None,
+              'trend': [{'timestamp': int, 'pct': float|None}, ...],
+              'impacted_interfaces': [
+                {'interface_name': str, 'gateway_hostname': str, 'gateway_mac': str,
+                 'duration': int, 'degraded': int, 'total': int}, ...
+              ]
+            }
+        """
+        rate_limited_any = False
+
+        # 1) summary
+        s = self._sle_app_health_get(site_id, 'summary')
+        rate_limited_any = rate_limited_any or s['rate_limited']
+        summary_pct = None
+        if s['success'] and isinstance(s['data'], dict):
+            # summary usually returns {"total": .., "good": .., "num_users":..} or {"sle": pct}
+            summary_pct = s['data'].get('sle')
+            if summary_pct is None:
+                total = s['data'].get('total') or 0
+                good = s['data'].get('good') or 0
+                if total > 0:
+                    summary_pct = round(100.0 * good / total, 2)
+
+        # 2) summary-trend
+        st = self._sle_app_health_get(site_id, 'summary-trend',
+                                      params={'interval': 3600, 'start': start, 'end': end})
+        rate_limited_any = rate_limited_any or st['rate_limited']
+        trend = []
+        if st['success'] and isinstance(st['data'], dict):
+            samples = st['data'].get('results') or st['data'].get('trend') or []
+            env_start = st['data'].get('start', start)
+            interval = st['data'].get('interval', HOUR_INTERVAL) or HOUR_INTERVAL
+            for i, entry in enumerate(samples):
+                if isinstance(entry, dict):
+                    ts = int(entry.get('time') or entry.get('timestamp') or (env_start + i * interval))
+                    pct = entry.get('sle')
+                    if pct is None:
+                        tot = entry.get('total') or 0
+                        good = entry.get('good') or 0
+                        pct = round(100.0 * good / tot, 2) if tot else None
+                    trend.append({'timestamp': ts, 'pct': pct})
+                else:
+                    ts = int(env_start + i * interval)
+                    trend.append({'timestamp': ts, 'pct': entry})
+
+        # 3) impacted-interfaces
+        ii = self._sle_app_health_get(site_id, 'impacted-interfaces',
+                                      params={'start': start, 'end': end})
+        rate_limited_any = rate_limited_any or ii['rate_limited']
+        impacted_interfaces = []
+        if ii['success']:
+            payload = ii['data']
+            entries = payload.get('results', []) if isinstance(payload, dict) else (payload or [])
+            for row in entries:
+                if not isinstance(row, dict):
+                    continue
+                impacted_interfaces.append({
+                    'interface_name': row.get('interface') or row.get('port_id') or row.get('name') or '',
+                    'gateway_hostname': row.get('hostname') or row.get('gateway_hostname') or '',
+                    'gateway_mac': row.get('mac') or row.get('gateway_mac') or '',
+                    'duration': row.get('duration', 0),
+                    'degraded': row.get('degraded', 0),
+                    'total': row.get('total', 0),
+                })
+
+        # 4) threshold
+        th = self._sle_app_health_get(site_id, 'threshold')
+        rate_limited_any = rate_limited_any or th['rate_limited']
+        threshold_pct = None
+        if th['success'] and isinstance(th['data'], dict):
+            threshold_pct = th['data'].get('threshold') or th['data'].get('sle')
+
+        return {
+            'success': True,
+            'rate_limited': rate_limited_any,
+            'site_id': site_id,
+            'summary_pct': summary_pct,
+            'threshold_pct': threshold_pct,
+            'trend': trend,
+            'impacted_interfaces': impacted_interfaces,
+        }

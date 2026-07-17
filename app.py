@@ -2,11 +2,21 @@
 MistCircuitStats - Flask application for displaying Gateway WAN port statistics
 """
 import os
+import io
+import csv
 import logging
-from datetime import datetime
+import time
+from datetime import datetime, timezone
+from urllib.parse import unquote
 from dotenv import load_dotenv
-from flask import Flask, render_template, jsonify, request
-from mist_connection import MistConnection
+from flask import Flask, render_template, jsonify, request, Response
+from mist_connection import (
+    MistConnection,
+    duration_to_seconds,
+    clip_to_retention_window,
+    hour_iso,
+    HOUR_INTERVAL,
+)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -188,6 +198,221 @@ def get_vpn_peers(gateway_id):
             
     except Exception as e:
         logger.error(f"Error fetching VPN peers: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# WAN Insights feature routes (spec 001-wan-insights-metrics)
+# ---------------------------------------------------------------------------
+
+def _resolve_site_and_device(site_id, device_id):
+    """Look up site_name and gateway_hostname for CSV export / envelope. Returns (site_name, gw_hostname)."""
+    site_name = ''
+    gw_hostname = ''
+    try:
+        for s in mist.get_sites() or []:
+            if s.get('id') == site_id:
+                site_name = s.get('name', '') or ''
+                break
+    except Exception as e:
+        logger.debug(f"Could not resolve site name: {e}")
+    try:
+        port_stats = mist.get_gateway_port_stats(device_id)
+        gw_hostname = port_stats.get('gateway_name', '') or ''
+    except Exception as e:
+        logger.debug(f"Could not resolve gateway hostname: {e}")
+    return site_name, gw_hostname
+
+
+def _compute_window(duration):
+    """Return (start, end, clipped, retention_notice) or raise ValueError."""
+    end = int(time.time())
+    seconds = duration_to_seconds(duration)
+    raw_start = end - seconds
+    start, clipped, notice = clip_to_retention_window(raw_start, end)
+    return start, end, clipped, notice
+
+
+def _build_hourly_response(site_id, device_id, port_id, duration):
+    """Shared assembler: returns the PortHourlyResponse dict (no jsonify wrap).
+
+    Raises ValueError on bad duration.
+    """
+    start, end, clipped, retention_notice = _compute_window(duration)
+
+    bw = mist.get_gateway_hourly_bandwidth(site_id, device_id, port_id, start, end)
+    wlh = mist.get_gateway_hourly_wan_link_health(site_id, device_id, port_id, start, end)
+    app_health = mist.get_site_application_health(site_id, start, end)
+
+    # Merge bandwidth + wan_link_health by hour bucket
+    wlh_by_ts = {s['timestamp']: s for s in wlh.get('samples', [])}
+    hourly = []
+    for bw_sample in bw.get('samples', []):
+        ts = bw_sample['timestamp']
+        wlh_sample = wlh_by_ts.get(ts, {})
+        hourly.append({
+            'timestamp': ts,
+            'hour_iso': bw_sample['hour_iso'],
+            'tx_bps': bw_sample.get('tx_bps'),
+            'rx_bps': bw_sample.get('rx_bps'),
+            'max_tx_bps': bw_sample.get('max_tx_bps'),
+            'max_rx_bps': bw_sample.get('max_rx_bps'),
+            'avg_latency_ms': wlh_sample.get('avg_latency_ms'),
+            'avg_jitter_ms': wlh_sample.get('avg_jitter_ms'),
+            'avg_loss_pct': wlh_sample.get('avg_loss_pct'),
+        })
+
+    # If bandwidth had no samples but wan_link_health did, fill from wlh
+    if not hourly and wlh.get('samples'):
+        for wlh_sample in wlh['samples']:
+            hourly.append({
+                'timestamp': wlh_sample['timestamp'],
+                'hour_iso': wlh_sample['hour_iso'],
+                'tx_bps': None, 'rx_bps': None,
+                'max_tx_bps': None, 'max_rx_bps': None,
+                'avg_latency_ms': wlh_sample.get('avg_latency_ms'),
+                'avg_jitter_ms': wlh_sample.get('avg_jitter_ms'),
+                'avg_loss_pct': wlh_sample.get('avg_loss_pct'),
+            })
+
+    site_name, gw_hostname = _resolve_site_and_device(site_id, device_id)
+
+    # Per-port slice of App Health SLE
+    port_app_health = None
+    if app_health.get('success') and app_health.get('summary_pct') is not None:
+        matched = any(
+            r.get('interface_name') == port_id and (
+                not gw_hostname or r.get('gateway_hostname') == gw_hostname
+            )
+            for r in app_health.get('impacted_interfaces', [])
+        )
+        port_app_health = {
+            'summary_pct': app_health.get('summary_pct'),
+            'threshold_pct': app_health.get('threshold_pct'),
+            'impacted': matched,
+        }
+
+    hourly_app_health = [
+        {'timestamp': t.get('timestamp'), 'pct': t.get('pct')}
+        for t in app_health.get('trend', [])
+    ]
+
+    return {
+        'success': True,
+        'port_id': port_id,
+        'device_id': device_id,
+        'gateway_hostname': gw_hostname,
+        'site_id': site_id,
+        'site_name': site_name,
+        'start': start,
+        'end': end,
+        'interval': HOUR_INTERVAL,
+        'clipped': clipped,
+        'retention_notice': retention_notice,
+        'hourly': hourly,
+        'port_app_health': port_app_health,
+        'hourly_app_health': hourly_app_health,
+        'rate_limited': {
+            'bandwidth': bool(bw.get('rate_limited')),
+            'wan_link_health': bool(wlh.get('rate_limited')),
+            'app_health': bool(app_health.get('rate_limited')),
+        },
+    }
+
+
+@app.route('/api/v1/sites/<site_id>/gateways/<device_id>/ports/<path:port_id>/hourly')
+def get_gateway_port_hourly(site_id, device_id, port_id):
+    """Per-port hourly Rx/Tx + jitter/latency/loss + App Health slice."""
+    try:
+        port_id = unquote(port_id)
+        duration = request.args.get('duration', '24h')
+        try:
+            body = _build_hourly_response(site_id, device_id, port_id, duration)
+        except ValueError as ve:
+            return jsonify({'success': False, 'error': str(ve)}), 400
+        return jsonify(body)
+    except Exception as e:
+        logger.error(f"Error building hourly response: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/v1/sites/<site_id>/gateways/<device_id>/ports/<path:port_id>/hourly/export')
+def export_gateway_port_hourly_csv(site_id, device_id, port_id):
+    """CSV export — canonical 12-column layout (see contract + data-model.md)."""
+    try:
+        port_id = unquote(port_id)
+        duration = request.args.get('duration', '24h')
+        try:
+            body = _build_hourly_response(site_id, device_id, port_id, duration)
+        except ValueError as ve:
+            return jsonify({'success': False, 'error': str(ve)}), 400
+
+        site_name = body['site_name']
+        gw_hostname = body['gateway_hostname']
+
+        buf = io.StringIO()
+        writer = csv.writer(buf, lineterminator='\n')
+        writer.writerow([
+            'site_name', 'gateway_name', 'port_id',
+            'hour_epoch', 'hour_iso',
+            'rx_avg_bps', 'rx_peak_bps',
+            'tx_avg_bps', 'tx_peak_bps',
+            'jitter_avg_ms', 'latency_avg_ms', 'loss_avg_pct',
+        ])
+
+        rows = sorted(body['hourly'], key=lambda r: (
+            site_name, gw_hostname, port_id, r['timestamp']
+        ))
+        for r in rows:
+            def cell(v):
+                return '' if v is None else v
+            writer.writerow([
+                site_name, gw_hostname, port_id,
+                r['timestamp'], r['hour_iso'],
+                cell(r.get('rx_bps')), cell(r.get('max_rx_bps')),
+                cell(r.get('tx_bps')), cell(r.get('max_tx_bps')),
+                cell(r.get('avg_jitter_ms')), cell(r.get('avg_latency_ms')),
+                cell(r.get('avg_loss_pct')),
+            ])
+
+        iso_now = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+        safe_port = port_id.replace('/', '_')
+        safe_host = gw_hostname or device_id
+        filename = f'hourly_metrics_{safe_host}_{safe_port}_{iso_now}.csv'
+
+        return Response(
+            buf.getvalue(),
+            mimetype='text/csv; charset=utf-8',
+            headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+        )
+    except Exception as e:
+        logger.error(f"Error exporting CSV: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/v1/sites/<site_id>/application-health-summary')
+def get_site_app_health_summary(site_id):
+    """Native Application Health SLE for a site (summary + trend + impacted interfaces + threshold)."""
+    try:
+        duration = request.args.get('duration', '24h')
+        try:
+            start, end, clipped, _notice = _compute_window(duration)
+        except ValueError as ve:
+            return jsonify({'success': False, 'error': str(ve)}), 400
+
+        result = mist.get_site_application_health(site_id, start, end)
+        body = {
+            'site_id': site_id,
+            'summary_pct': result.get('summary_pct'),
+            'threshold_pct': result.get('threshold_pct'),
+            'trend': result.get('trend', []),
+            'impacted_interfaces': result.get('impacted_interfaces', []),
+            'clipped': clipped,
+            'rate_limited': bool(result.get('rate_limited')),
+        }
+        return jsonify(body)
+    except Exception as e:
+        logger.error(f"Error fetching site application health: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
