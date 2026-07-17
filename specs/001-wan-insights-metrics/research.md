@@ -11,20 +11,34 @@ There are **no NEEDS CLARIFICATION markers** in the Technical Context — the us
 
 ---
 
-## D-1: Direct `requests` vs. `mistapi` SDK helpers for the new insight/SLE endpoints
+## D-1: `mistapi>=0.63.3` SDK helpers vs. direct `requests` for the new insight/SLE endpoints
 
-**Decision**: Use direct `requests.get(...)` calls from methods on `MistConnection`, mirroring the pattern already established by `get_vpn_peer_stats` (see `mist_connection.py:891-987`). Auth header is `Authorization: Token {self.api_token}`. Every call funnels through `_handle_rate_limit_response` / `_mark_token_rate_limited`.
+**Decision**: Bump `mistapi` from `0.44.3` → `>=0.63.3` in `requirements.txt`. For each new endpoint, prefer the typed SDK helper if 0.63.3+ exposes one; otherwise fall back to the direct `requests.get(...)` pattern already established by `get_vpn_peer_stats` (see `mist_connection.py:891-987`). All calls — SDK or direct — funnel through `_handle_rate_limit_response` / `_mark_token_rate_limited`. SDK helper availability is verified in the T-000 upgrade task in `tasks.md` before wrappers are written.
 
 **Rationale**:
 
-- The pinned SDK version (`mistapi==0.44.3` in `requirements.txt`) does not expose typed helpers for `insights/gateway/{id}/stats?metrics=tx_bps,rx_bps,max_tx_bps,max_rx_bps`, `insights/gateway/{id}/stats?metrics=wan_link_health`, or the `application-health` site SLE endpoints.
-- `get_vpn_peer_stats` already demonstrates the direct-`requests` pattern coexisting cleanly with the SDK-based methods, using the same token, host, and 429-handling.
-- The user's explicit constraint says "no framework changes" and "new API calls must funnel through the same 429 pattern". Direct `requests` satisfies both without a dependency bump.
+- The feature owner explicitly requires the current mistapi release (`>=0.63.3`) rather than the currently pinned `0.44.3`.
+- Newer mistapi releases expose typed helpers for many insight/SLE endpoints that were absent in 0.44.3 — using them where available reduces custom URL-construction bugs and gets us free 200/401/429 handling from the SDK.
+- Where 0.63.3 still lacks a helper for a specific endpoint (e.g., a particular `metrics=` combination on the gateway insights route or a specific `application-health` sub-endpoint), the direct-`requests` fallback keeps the same auth header (`Authorization: Token {self.api_token}`) and multi-token 429 rotation flow, exactly as `get_vpn_peer_stats` demonstrates today.
+- Existing `MistConnection` methods (`getSelf`, `getOrg`, `listOrgSites`, `listOrgDevicesStats`, `searchOrgSwOrGwPorts`, `getSiteDevice`, `searchSiteDevices`, `searchOrgDevices`, `getOrgInventory`, `getOrgDeviceProfile`, `getOrgGatewayTemplate`) must be regression-smoke-tested against 0.63.3 as part of the upgrade task; any signature drift is captured in the same commit.
 
 **Alternatives considered**:
 
-- Bump `mistapi` to a newer version and use SDK helpers. **Rejected**: adds a dependency-upgrade PR blast radius (unrelated behavior changes in the SDK, breaking-change risk to existing methods that already work) that this feature does not benefit from.
-- Wrap `requests` in a new internal HTTP client. **Rejected**: YAGNI. Two direct-`requests` methods already exist in the file; a third does not justify extracting an abstraction.
+- Stay pinned at `mistapi==0.44.3` and use direct `requests` for every new endpoint. **Rejected**: contradicts the feature owner's explicit constraint to run on the current SDK release.
+- Bump to `>=0.63.3` and *require* SDK helpers for every endpoint (no fallback). **Rejected**: if 0.63.3 lacks a helper for one of the new endpoints, we would either block the feature or copy the SDK's boilerplate into our code — the fallback keeps forward progress without adding scope.
+- Wrap `requests` in a new internal HTTP client. **Rejected**: YAGNI. `get_vpn_peer_stats` already demonstrates the direct-`requests` pattern coexisting cleanly with SDK methods; a third or fourth such method does not justify extracting an abstraction.
+
+---
+
+## D-2: (removed)
+
+*(D-2 removed in cascade rewrite 2026-07-17 — no client-side aggregation. Per-port jitter/latency/loss is native via the `wan_link_health` insight metric; there is no rollup math to design.)*
+
+---
+
+## D-3: (removed)
+
+*(D-3 removed in cascade rewrite 2026-07-17 — no zero-peer wire shape. Empty state is the plain "no data reported in window" case; the `"N/A"` JSON string is gone.)*
 
 ---
 
@@ -38,6 +52,18 @@ There are **no NEEDS CLARIFICATION markers** in the Technical Context — the us
 
 - Client-side-only clipping. **Rejected**: silently drops the guarantee for non-browser callers of the same route.
 - Return the raw API error when the range is out of bounds. **Rejected**: spec explicitly requires "clip and notify", not "error and abort".
+
+---
+
+## D-5: (removed)
+
+*(D-5 removed in cascade rewrite 2026-07-17 — no peer discovery. `get_port_wan_link_health_hourly` is a single call keyed by `port_id`; no fanout across peer paths.)*
+
+---
+
+## D-6: (removed)
+
+*(D-6 removed in cascade rewrite 2026-07-17 — `vpn_peer-metrics` is no longer called by this feature. The existing `get_vpn_peer_stats` peer-view feature is untouched; US2 no longer depends on it.)*
 
 ---
 
@@ -109,6 +135,12 @@ No substitution notice on the site tile. No aggregation label on the port perfor
 
 ---
 
+## D-11: (removed)
+
+*(D-11 removed in cascade rewrite 2026-07-17 — no substitution notice. Application Health % is a real first-class Mist SLE on SSR; the tile is labelled "Application Health %" with no proxy, no asterisk, no session-storage-gated notice.)*
+
+---
+
 ## D-12: Testing posture for this feature
 
 **Decision**: This feature ships with a **manual acceptance-scenario walkthrough** documented in `quickstart.md`. No pytest suite is added. No aggregation helper exists to unit-test — the correction removed the only pure-function candidate (`rollup_peer_metrics_simple_mean`) because port-level jitter/latency/loss is now native.
@@ -126,14 +158,19 @@ No substitution notice on the site tile. No aggregation label on the port perfor
 
 | ID | Area | Decision | Locks |
 |----|------|----------|-------|
-| D-1 | HTTP client | Direct `requests` on `MistConnection`, matching `get_vpn_peer_stats` | FR-009 |
+| D-1 | HTTP client | `mistapi>=0.63.3` SDK helpers where exposed; direct `requests` fallback matching `get_vpn_peer_stats` where not | FR-009 |
+| D-2 | *(removed)* | Client-side aggregation math — no longer applicable; `wan_link_health` is native per port | — |
+| D-3 | *(removed)* | Zero-peer `"N/A"` JSON string — no longer applicable; empty state is plain no-data | — |
 | D-4 | Timeframe defaults | 24h default, 3d/7d selector, server-side clip to 14d | FR-010 |
-| D-7 | CSV delivery | New `/hourly/csv` route on `app.py`; server-generated; fixed column set with no aggregation metadata | FR-011 |
+| D-5 | *(removed)* | Peer discovery for fanout — no longer applicable; no fanout | — |
+| D-6 | *(removed)* | `vpn_peer-metrics` params — no longer called by this feature | — |
+| D-7 | CSV delivery | New `/hourly/csv` route on `app.py`; server-generated; fixed 12-column set with no aggregation metadata | FR-011 |
 | D-8 | Application Health shape | Four wrappers (`summary`, `summary-trend`, `impacted-interfaces`, `threshold`); each returns `{available, reason?, ...}` | FR-007 |
-| D-9 | Frontend location | Three new panels in `#chartModal`, one new tile in site view; order fixed | FR-012 |
+| D-9 | Frontend location | Three new panels in `#chartModal`, one new Application Health tile in site view; order fixed | FR-012 |
 | D-10 | Caching | No new caches in MVP | User constraint |
+| D-11 | *(removed)* | Substitution notice — no longer applicable; Application Health is native | — |
 | D-12 | Testing | Manual acceptance walkthrough only; no pytest | Existing project posture |
 
-D-2 (aggregation math), D-3 (zero-peer wire shape), D-5 (peer discovery), D-6 (`vpn_peer-metrics` params), D-11 (substitution notice) are **removed** — all five encoded assumptions the corrections invalidated.
+D-2 (aggregation math), D-3 (zero-peer wire shape), D-5 (peer discovery), D-6 (`vpn_peer-metrics` params), D-11 (substitution notice) are **removed** — all five encoded assumptions the corrections invalidated. Their headings remain above (as one-line stubs) so downstream references to `D-N` numbers do not shift.
 
 All decisions above are consistent with the user-supplied constraints and the clarified spec. There are no remaining unknowns that block Phase 1.

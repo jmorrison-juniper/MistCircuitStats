@@ -1,5 +1,5 @@
 Flask==3.0.0
-mistapi==0.44.3
+mistapi>=0.63.3
 gunicorn==21.2.0
 python-dotenv>=0.15.0,<0.17
 requests==2.31.0

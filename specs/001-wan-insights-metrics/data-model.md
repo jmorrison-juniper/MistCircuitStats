@@ -3,9 +3,11 @@
 **Feature**: `001-wan-insights-metrics`
 **Date**: 2026-07-17
 
+> **Rev 2026-07-17 cascade**: The `VpnPeerPath`, `HourlyPerformanceRollup`, and `SiteWanLinkHealth` entities have been removed. Per-port jitter/latency/loss is now sourced from the native `wan_link_health` insight metric (no fanout, no rollup, no `aggregation_method` label, no `peer_count`, no zero-peer `"N/A"` wire shape). Site-level Application Health % is a real first-class Mist SLE on SSR — no substitution, no proxy. This cascade also bumps `mistapi>=0.63.3`; new SDK helpers are preferred where available, direct-`requests` fallback otherwise. See `docs/customer_response_wan_insights.md` for the ground-truth corrections that drove this rev.
+
 The feature adds no persistent storage. All entities below are **wire shapes and in-memory Python dict shapes** returned by new methods on `MistConnection` and by new Flask routes on `app.py`. Field types follow Python semantics; JSON serialization is the default `flask.jsonify` behavior.
 
-Field-level validation rules and state transitions are called out where they exist. The zero-peer rendering rule (FR-006a) is the only non-trivial state distinction.
+Field-level validation rules are called out where they exist. There is no peer-rollup state; empty states are the plain "no data reported in window" case.
 
 ---
 
@@ -18,28 +20,10 @@ The `(site_id, device_id, port_id)` triple that anchors every per-port metric in
 | `site_id` | `str` (UUID) | Mist site identifier |
 | `device_id` | `str` (UUID) | Mist device (gateway) identifier |
 | `port_id` | `str` | e.g. `ge-0/0/0`, may contain `/`; URL-decoded before use |
-| `gateway_name` | `str` | Human-readable gateway hostname |
+| `gateway_hostname` | `str` | Human-readable gateway hostname |
 | `site_name` | `str` | Human-readable site name |
 
-**Source**: Already discovered by the existing gateway/port dashboard. New feature routes accept `gateway_id` + `port_id` (as URL path) plus `site_id` (query string) and derive the rest server-side.
-
----
-
-## Entity: VpnPeerPath
-
-An active SVR peer relationship between a local port and a remote router port. Identifies the fanout target for `vpn_peer-metrics` calls.
-
-| Field | Type | Notes |
-|---|---|---|
-| `port_id` | `str` | Local port carrying the peer path |
-| `peer_router_name` | `str` | Remote router hostname (Mist API returns this) |
-| `peer_mac` | `str \| None` | Remote device MAC when known |
-| `peer_port_id` | `str` | Remote port carrying the peer side |
-| `policy` | `str \| None` | Peer-path policy name when present in the peer record |
-
-**Source**: Returned by `MistConnection.get_vpn_peer_stats(site_id, device_mac)` (existing method). Field names above match its returned dict keys (`mist_connection.py:960-972`) with the addition of `peer_mac` and `policy` when the upstream API includes them.
-
-**Validation**: At least one of `peer_router_name` or `peer_mac` MUST be non-empty before a `vpn_peer-metrics` request is fanned out. Records failing this filter are logged and skipped (not silently zero-included).
+**Source**: Already discovered by the existing gateway/port dashboard. New feature routes accept `device_id` + `port_id` (as URL path) plus `site_id` (query string) and derive the rest server-side.
 
 ---
 
@@ -49,42 +33,36 @@ A 1-hour rollup bucket for one WAN port's utilization. One instance per hour buc
 
 | Field | Type | Notes |
 |---|---|---|
-| `hour_epoch` | `int` | UTC Unix seconds at hour boundary (bucket start) |
+| `timestamp` | `int` | UTC Unix seconds at hour boundary (bucket start) |
 | `hour_iso` | `str` | ISO 8601 UTC (`YYYY-MM-DDTHH:00:00Z`) |
-| `rx_avg_bps` | `float` | From `tx_rx_bps.rx_bps[i]` |
-| `rx_peak_bps` | `float` | From `tx_rx_bps.max_rx_bps[i]` |
-| `tx_avg_bps` | `float` | From `tx_rx_bps.tx_bps[i]` |
-| `tx_peak_bps` | `float` | From `tx_rx_bps.max_tx_bps[i]` |
+| `rx_bps` | `float` | From `rx_bps[i]` |
+| `max_rx_bps` | `float` | From `max_rx_bps[i]` |
+| `tx_bps` | `float` | From `tx_bps[i]` |
+| `max_tx_bps` | `float` | From `max_tx_bps[i]` |
 
-**Source**: `MistConnection.get_port_tx_rx_bps_hourly(site_id, device_id, port_id, start, end)` -> zips the four timeseries arrays returned by `insights/device/{device_id}/tx_rx_bps?interval=3600` with the timestamp array constructed from `start` + `i * 3600`.
+**Source**: `MistConnection.get_gateway_hourly_bandwidth(site_id, device_id, port_id, start, end)` — wraps `GET /api/v1/sites/{site_id}/insights/gateway/{device_id}/stats?metrics=tx_bps,rx_bps,max_tx_bps,max_rx_bps&port_id={port_id}&interval=1h&start=&end=` (URL per spec.md § FR-001 / `docs/customer_response_wan_insights.md`). Where `mistapi>=0.63.3` exposes a typed helper for this metric set, prefer it; otherwise fall back to direct `requests.get` mirroring `get_vpn_peer_stats`. Zips the four returned arrays with the timestamp array constructed from `start + i * 3600`.
 
-**Validation**: If the upstream response has zero-length arrays across all four series, the wrapper returns `[]` (empty list). The route serializes `[]` with `empty: true` in the envelope so the UI renders the FR-015 empty state.
+**Validation**: If the upstream response has zero-length arrays across all four series, the wrapper returns `[]` (empty list). The route surfaces this to the UI via an empty `hourly` list.
 
 **State**: Immutable snapshot; no transitions.
 
 ---
 
-## Entity: HourlyPerformanceRollup
+## Entity: HourlyPortWanLinkHealth
 
-A 1-hour aggregated rollup bucket for one WAN port's jitter / latency / loss, computed client-side by `rollup_peer_metrics_simple_mean` across every contributing peer path.
+A 1-hour bucket for one WAN port's native jitter / latency / loss, sourced directly from the `wan_link_health` insight metric. **No `peer_count`, no `aggregation_method`, no `"N/A"` sentinel — the metric is native per port.**
 
 | Field | Type | Notes |
 |---|---|---|
-| `hour_epoch` | `int` | UTC Unix seconds at hour boundary |
-| `hour_iso` | `str` | ISO 8601 UTC |
-| `avg_latency_ms` | `float \| "N/A"` | Simple mean across peers reporting in this hour; `"N/A"` if zero peers reported this hour (FR-006a) |
-| `avg_jitter_ms` | `float \| "N/A"` | Same rule |
-| `avg_loss_pct` | `float \| "N/A"` | Same rule |
-| `aggregation_method` | `str` | Literal `"simple_mean"` in the MVP (FR-006) |
-| `peer_count` | `int` | Number of peers that reported a value **in this hour** (0 when N/A) |
+| `timestamp` | `int` | UTC Unix seconds at hour boundary |
+| `port_id` | `str` | Port identifier this sample belongs to |
+| `avg_latency_ms` | `float \| None` | From `wan_link_health.<port>.avg_latency[i]`; `None` when the upstream slot is missing/null |
+| `avg_jitter_ms` | `float \| None` | From `wan_link_health.<port>.avg_jitter[i]`; `None` when the upstream slot is missing/null |
+| `avg_loss_pct` | `float \| None` | From `wan_link_health.<port>.avg_loss[i]`; `None` when the upstream slot is missing/null |
 
-**Source**: `rollup_peer_metrics_simple_mean(peer_hourly_series)` — a pure function on `MistConnection` (no I/O). Input is a dict `{ peer_key: [{hour_epoch, avg_latency, avg_jitter, avg_loss}, ...] }`. Output is a list of `HourlyPerformanceRollup` dicts, one per hour bucket in the requested window.
+**Source**: `MistConnection.get_gateway_hourly_wan_link_health(site_id, device_id, port_id, start, end)` — wraps `GET /api/v1/sites/{site_id}/insights/gateway/{device_id}/stats?metrics=wan_link_health&port_id={port_id}&interval=1h&start=&end=` (URL per spec.md § FR-003 / `docs/customer_response_wan_insights.md`). The API returns per-port `avg_latency` / `avg_jitter` / `avg_loss` arrays natively (device scope, keyed-timeseries, 14-day retention at 1h). No client-side fanout, no peer discovery, no rollup.
 
-**Validation**:
-
-- `aggregation_method` MUST equal `"simple_mean"` in every emitted row for MVP (FR-006). A code-level assertion enforces this before returning.
-- The `float | "N/A"` union is enforced at emit time: if `peer_count == 0` for that hour, all three metric fields MUST be the JSON string `"N/A"`; otherwise all three MUST be finite floats. No mixed rows.
-- CSV emit path maps `"N/A"` -> empty string per FR-006a; this is the ONLY place the mapping lives.
+**Validation**: If the upstream response has all-empty arrays for a given port (port has never reported `wan_link_health` in the window — e.g. a direct-internet WAN uplink with no measured link-health telemetry), the wrapper returns `[]` for that port. No aggregation is applied. No `peer_count` field exists. No `"N/A"` sentinel exists.
 
 **State**: Immutable snapshot; no transitions.
 
@@ -92,81 +70,78 @@ A 1-hour aggregated rollup bucket for one WAN port's jitter / latency / loss, co
 
 ## Entity: PortHourlyResponse (envelope)
 
-The top-level object returned by `GET /api/gateway/<id>/port/<port_id>/hourly?...`.
+The top-level object returned by `GET /api/v1/sites/<site_id>/gateways/<device_id>/ports/<port_id>/hourly`.
 
 | Field | Type | Notes |
 |---|---|---|
 | `success` | `bool` | Matches the existing route-envelope convention |
 | `port_id` | `str` | Echoed from request |
-| `gateway_id` | `str` | Echoed from request |
-| `gateway_name` | `str` | Resolved server-side |
+| `device_id` | `str` | Echoed from request (gateway UUID) |
+| `gateway_hostname` | `str` | Resolved server-side |
 | `site_id` | `str` | Echoed from request |
 | `site_name` | `str` | Resolved server-side |
-| `duration` | `str` | Echoed (`"24h"`, `"3d"`, or `"7d"`) |
-| `interval_seconds` | `int` | Always `3600` for MVP |
-| `start_epoch` | `int` | Actual start after clipping |
-| `end_epoch` | `int` | Actual end |
+| `start` | `int` | Actual start epoch after clipping |
+| `end` | `int` | Actual end epoch |
+| `interval` | `int` | Always `3600` for MVP |
 | `clipped` | `bool` | `true` when the requested start was earlier than `end - 14d` (FR-010) |
 | `retention_notice` | `str` | Human-readable notice, non-empty when `clipped` is `true` |
-| `utilization` | `List[HourlyUtilizationSample]` | Ordered ascending by `hour_epoch` |
-| `performance` | `List[HourlyPerformanceRollup]` | Ordered ascending by `hour_epoch` |
-| `peers` | `List[VpnPeerPath]` | Contributing peers over the window (union, not per-hour); empty list when port has no peers |
-| `peer_breakdown` | `Dict[str, List[Dict]]` | Optional, per-peer hourly series keyed by `f"{peer_router_name}::{peer_port_id}"` — enables SC-003 one-click drilldown |
-| `aggregation_method` | `str` | Top-level echo of `"simple_mean"` for convenience |
-| `empty_utilization` | `bool` | `true` when `utilization` is empty; drives FR-015 empty state |
-| `empty_performance` | `bool` | `true` when `peers` is empty; drives FR-014 empty state |
+| `hourly` | `List[Object]` | Merged per-hour rows — each row contains both bandwidth (`tx_bps`, `rx_bps`, `max_tx_bps`, `max_rx_bps`) and native wan_link_health (`avg_latency_ms`, `avg_jitter_ms`, `avg_loss_pct`) fields for one hour bucket. Ordered ascending by `timestamp`. Empty list when Mist returned zero samples in the window |
+| `port_app_health` | `Object \| null` | Per-port slice from the site's Application Health SLE. Shape: `{summary_pct, threshold_pct}`. `null` when the site does not report application-health |
+| `hourly_app_health` | `List[Object]` | Per-hour Application Health series for this port, sourced from the site's `summary-trend`. Each row: `{timestamp, pct}`. Empty list when the site does not report application-health |
 
-**Validation**: `success == true` iff all upstream calls succeeded OR rate-limited responses were handled (the response is still returned but with populated `rate_limited: true` on individual sub-sections; caller inspects). On hard errors (non-429 non-200), the route returns `{success: false, error: <str>}` with HTTP 500.
+**Dropped fields** (present in the pre-cascade envelope, removed in this rev): `peers`, `peer_breakdown`, `aggregation_method`, `empty_performance`.
+
+**Validation**: `success == true` iff all upstream calls succeeded OR rate-limited responses were handled (the response is still returned but with populated `rate_limited: true` on individual sub-sections; caller inspects). On hard errors (non-429 non-200), the route returns `{success: false, error: <str>}` with HTTP 500. When application-health is unavailable for the site, `port_app_health` is `null` and `hourly_app_health` is `[]`; the bandwidth and wan_link_health portions of `hourly` continue to render normally.
 
 ---
 
-## Entity: SiteWanLinkHealth
+## Entity: SiteApplicationHealth
 
-Response body for `GET /api/site/<site_id>/wan_link_health`.
+Response body for `GET /api/v1/sites/<site_id>/application-health-summary`. Sourced from the four native Mist Application Health SLE endpoints on SSR — no substitution, no proxy.
 
 | Field | Type | Notes |
 |---|---|---|
-| `success` | `bool` | |
-| `available` | `bool` | `false` when Mist returned HTTP 400 or null for the SLE (SSR without health data) |
-| `reason` | `str \| None` | Populated only when `available == false` — e.g. `"wan-link-health SLE returned HTTP 400"` |
-| `site_id` | `str` | |
-| `site_name` | `str` | Resolved server-side |
-| `health_pct` | `float \| None` | Site-level rollup percentage; null when unavailable |
-| `classifiers` | `Dict[str, float]` | Keys: `network-jitter`, `network-loss`, `network-latency`, `interface-congestion`, `network-vpn-path-down`, `isp-reachability-arp`, `isp-reachability-dhcp`. Values are percentages. All keys always present; unavailable classifiers report `0.0` and the UI hides them |
-| `hourly` | `List[Dict]` | One entry per hour bucket: `{hour_epoch, hour_iso, health_pct, classifier_breakdown: Dict[str, float]}` |
-| `substitution_notice` | `str` | Verbatim FR-008 / Acceptance Scenario 3.2 copy |
-| `retention_notice` | `str \| None` | Same clipping rule as `PortHourlyResponse` |
-| `clipped` | `bool` | |
+| `site_id` | `str` | Mist site identifier |
+| `summary_pct` | `float \| null` | Current site-level Application Health % from `.../summary`. `null` when unavailable |
+| `threshold_pct` | `float \| null` | SLE goal for the benchmark ring (e.g. 96.0) from `.../threshold`. `null` when unavailable |
+| `trend` | `List[Object]` | Per-hour series from `.../summary-trend?interval=3600`. Each row: `{timestamp, pct}`. Empty list when unavailable |
+| `impacted_interfaces` | `List[Object]` | Per-port rows from `.../impacted-interfaces`. Each row: `{interface_name, gateway_hostname, gateway_mac, duration, degraded, total}`. Empty list when unavailable |
+| `clipped` | `bool` | `true` when the requested start was earlier than `end - 14d` |
+| `retention_notice` | `str \| null` | Human-readable clip notice, non-null when `clipped` is `true` |
+
+**Classifiers**: Mist aggregates six classifiers server-side into every `summary` / `summary-trend` sample — `jitter`, `latency`, `loss`, `application-services-application-bandwidth`, `application-services-slow-application`, `application-services-application-disconnects`. The client does NOT enumerate them per-sample; each hour's `pct` is the already-aggregated site-wide Application Health value.
 
 **Validation**:
 
-- When `available == false`, `hourly` MUST be `[]` and `health_pct` MUST be `null`. The UI renders the "unavailable" tile state with the classifier list still visible per Acceptance Scenario 3.4 (the list is rendered from the fixed classifier-key set, not from `classifiers` values).
-- When `available == true`, `hourly` MUST be non-empty and all classifier keys MUST be present in every hour's `classifier_breakdown`.
+- When Mist returns HTTP 400 or null across the four endpoints (site does not report application-health), `summary_pct` and `threshold_pct` MUST be `null`, `trend` MUST be `[]`, `impacted_interfaces` MUST be `[]`.
+- No `substitution_notice` field. No proxy metric. No session-storage notice. The tile is labelled "Application Health %" verbatim.
 
 ---
 
 ## Entity: HourlyMetricsCsvRow
 
-One row of the new "Export Hourly Metrics" CSV. Column order is FIXED and enforced by the server-side CSV writer.
+One row of the new "Export Hourly Metrics" CSV. Column order is FIXED and enforced by the server-side CSV writer. **Exactly 12 columns.**
 
 | Column (in order) | Type | Notes |
 |---|---|---|
 | `site_name` | `str` | |
-| `gateway_name` | `str` | |
+| `gateway_name` | `str` | Human-readable gateway hostname |
 | `port_id` | `str` | |
-| `hour_epoch` | `int` | UTC seconds |
-| `hour_iso` | `str` | UTC ISO 8601 (`YYYY-MM-DDTHH:00:00Z`) — MUST remain UTC even if UI shows local time |
-| `rx_avg_bps` | `float` | From `HourlyUtilizationSample.rx_avg_bps` |
-| `rx_peak_bps` | `float` | From `HourlyUtilizationSample.rx_peak_bps` |
-| `tx_avg_bps` | `float` | From `HourlyUtilizationSample.tx_avg_bps` |
-| `tx_peak_bps` | `float` | From `HourlyUtilizationSample.tx_peak_bps` |
-| `jitter_avg_ms` | `float \| ""` | Empty string when `peer_count == 0` for that hour (FR-006a) |
-| `latency_avg_ms` | `float \| ""` | Empty string when `peer_count == 0` for that hour |
-| `loss_avg_pct` | `float \| ""` | Empty string when `peer_count == 0` for that hour |
-| `aggregation_method` | `str` | Literal `simple_mean` in every row for MVP |
-| `peer_count` | `int` | 0 allowed (indicates the three columns above are empty string) |
+| `hour_epoch` | `int` | UTC seconds at hour boundary — MUST remain UTC even if UI shows local time |
+| `hour_iso` | `str` | ISO 8601 UTC (`YYYY-MM-DDTHH:00:00Z`) — MUST remain UTC |
+| `rx_avg_bps` | `float` | From `HourlyUtilizationSample.rx_bps` |
+| `rx_peak_bps` | `float` | From `HourlyUtilizationSample.max_rx_bps` |
+| `tx_avg_bps` | `float` | From `HourlyUtilizationSample.tx_bps` |
+| `tx_peak_bps` | `float` | From `HourlyUtilizationSample.max_tx_bps` |
+| `jitter_avg_ms` | `float \| ""` | Empty string when the underlying `wan_link_health` hour bucket is null/missing (plain no-data) |
+| `latency_avg_ms` | `float \| ""` | Empty string when the underlying `wan_link_health` hour bucket is null/missing |
+| `loss_avg_pct` | `float \| ""` | Empty string when the underlying `wan_link_health` hour bucket is null/missing |
 
-**Validation**: The CSV writer emits every row through a single formatter that maps `"N/A"` (from the JSON layer) or `None` to `""`. `aggregation_method` MUST equal `simple_mean` in every row; a code-level assertion enforces this.
+**Explicitly dropped**: `peer_count` and `aggregation_method` columns. Both were rollup-metadata artifacts of the (now-removed) client-side aggregation. Also dropped from the pre-cascade draft: `site_id` (not in the canonical spec column set).
+
+**Column authority**: The column list, order, and names above are governed by spec.md § FR-011 and match the canonical CSV in `docs/customer_response_wan_insights.md` line 219. Any drift from that column set is a spec violation.
+
+**Validation**: The CSV writer emits every row through a single formatter that maps `None` to `""` for the three performance columns.
 
 **Ordering**: Rows sorted ascending by `(site_name, gateway_name, port_id, hour_epoch)`. This makes diffs across exports deterministic.
 
@@ -175,13 +150,15 @@ One row of the new "Export Hourly Metrics" CSV. Column order is FIXED and enforc
 ## Relationships
 
 ```
-WanPort  1 ── N  VpnPeerPath              (a port carries 0..N peer paths)
-WanPort  1 ── N  HourlyUtilizationSample  (one per hour bucket in window)
-WanPort  1 ── N  HourlyPerformanceRollup  (one per hour bucket in window; rolled up from VpnPeerPath per-peer hourly series)
-Site     1 ── N  SiteWanLinkHealth        (one wrapper response per site request)
+WanPort  1 ── N  HourlyUtilizationSample                (one per hour bucket in window)
+WanPort  1 ── N  HourlyPortWanLinkHealth                (one per hour bucket in window; native wan_link_health)
+Site     1 ── 1  SiteApplicationHealth                  (one wrapper response per site request)
+Site     1 ── N  SiteApplicationHealth.impacted_interfaces  (per-port rows; each row keyed by (gateway_hostname, interface_name))
+PortHourlyResponse.hourly           →  HourlyPortWanLinkHealth[]           (merged with bandwidth per hour bucket)
+PortHourlyResponse.hourly_app_health ← SiteApplicationHealth.trend         (site-scoped, filtered per port)
 ```
 
-No object references anywhere in the wire shape — the identity keys are inlined into the response for the frontend's convenience.
+No `VpnPeerPath` relationship exists. No object references anywhere in the wire shape — the identity keys are inlined into the response for the frontend's convenience.
 
 ---
 
@@ -189,13 +166,18 @@ No object references anywhere in the wire shape — the identity keys are inline
 
 | Rule | Enforced Where | Source |
 |------|----------------|--------|
-| `aggregation_method == "simple_mean"` in every row (MVP) | `rollup_peer_metrics_simple_mean` + CSV writer assertion | FR-006 |
-| Zero-peer hour -> `"N/A"` in JSON, empty string in CSV; never `0`/`null` | `rollup_peer_metrics_simple_mean` emit path + CSV formatter | FR-006a, FR-014 |
-| Requested `start` clipped to `end - 14d` | `MistConnection.get_port_tx_rx_bps_hourly` and route handler | FR-010 |
+| Requested `start` clipped to `end - 14d` | `MistConnection.get_gateway_hourly_bandwidth` / `get_gateway_hourly_wan_link_health` / `get_site_application_health` / route handler | FR-010 |
 | `clipped == true` implies `retention_notice` non-empty | Route handler | FR-010 |
-| Peers with no reporting for an hour excluded from that hour's mean denominator | `rollup_peer_metrics_simple_mean` | Spec §Edge Cases §Peer path churn |
-| Every new API call goes through `_handle_rate_limit_response` | `MistConnection` methods | FR-009, SC-005 |
+| Every new API call goes through `_handle_rate_limit_response` / `_mark_token_rate_limited` | `MistConnection` methods (SDK or direct-`requests`) | FR-009, SC-005 |
 | CSV hour timestamps remain UTC | CSV writer | FR-011, spec §Edge Cases §Time zone |
-| `application-health` unavailable does NOT block WAN Link Health tile | Route handler | FR-007, Acceptance 3.4 |
+| No-data case: `hourly` is `[]`; `clipped` reflects whether retention window forced a clamp | Route handler | FR-015 |
+| `application-health` unavailable → `summary_pct` / `threshold_pct` null, `trend` / `impacted_interfaces` empty | `get_site_application_health` wrapper + route handler | FR-007 |
+| Site tile is labelled "Application Health %" verbatim — no substitution notice, no proxy | `templates/index.html` site tile | FR-007 |
 
 No entity has state transitions in the MVP. All entities are immutable snapshots produced per request.
+
+---
+
+## Changelog
+
+- **2026-07-17 cascade rewrite**: removed peer-rollup (`VpnPeerPath`, `HourlyPerformanceRollup`, `aggregation_method`, `peer_count`, `"N/A"` sentinel); added native `wan_link_health` entity (`HourlyPortWanLinkHealth`); added real Application Health SLE entity (`SiteApplicationHealth`) — no substitution; simplified CSV to 12 columns; bumped `mistapi>=0.63.3` (prefer typed SDK helpers, direct-`requests` fallback). Ground-truth source: `docs/customer_response_wan_insights.md`.
