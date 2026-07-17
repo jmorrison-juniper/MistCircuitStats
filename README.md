@@ -17,6 +17,7 @@ A Flask web application that displays Gateway WAN port statistics from all gatew
 - 🔍 Search and filter by site or gateway name
 - 🎯 Per-port detailed statistics and configuration
 - 📥 CSV export with peer path counts
+- 📡 **WAN Insights panel** — per-port hourly Rx/Tx (avg + peak), native `wan_link_health` jitter/latency/loss, and the site's native Application Health SLE (24h / 3d / 7d windows, CSV export)
 - 🐳 Multi-architecture Docker support (amd64/arm64)
 
 ## Quick Start
@@ -200,8 +201,25 @@ This application uses the following Juniper Mist API endpoints via the `mistapi`
 | `mistapi.api.v1.sites.devices.searchSiteDevices` | GET | Get runtime interface stats (DHCP IPs) |
 | `mistapi.api.v1.orgs.devices.searchOrgDevices` | GET | Search devices by criteria |
 | `/api/v1/sites/{site_id}/insights/gateway/{device_id}/stats` | GET | Port-specific time-series traffic data |
+| `/api/v1/sites/{site_id}/insights/gateway/{device_id}/stats?metrics=tx_bps,rx_bps,max_tx_bps,max_rx_bps&port_id=&interval=1h` | GET | WAN Insights hourly bandwidth (avg + peak) |
+| `/api/v1/sites/{site_id}/insights/gateway/{device_id}/stats?metrics=wan_link_health&port_id=&interval=1h` | GET | Native per-port jitter/latency/loss (no peer fanout, no client-side rollup) |
+| `/api/v1/sites/{site_id}/sle/site/{site_id}/metric/application-health/{summary,summary-trend,impacted-interfaces,threshold}` | GET | Native Application Health SLE (User Story 3) |
 
 > **Note**: Time-series charts use the Mist Insights API directly for windowed bandwidth metrics with parameters: `port_id`, `start`, `end`, `interval`, `metrics=rx_bps,tx_bps`
+
+### App-Exposed Endpoints (WAN Insights)
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| GET | `/api/v1/sites/{site_id}/gateways/{device_id}/ports/{port_id}/hourly?duration=24h\|3d\|7d` | Per-port hourly bandwidth (avg + peak) + native `wan_link_health` J/L/L + per-port slice of Application Health SLE |
+| GET | `/api/v1/sites/{site_id}/gateways/{device_id}/ports/{port_id}/hourly/export?duration=...` | RFC 4180 CSV export, canonical 12 columns (`site_name,gateway_name,port_id,hour_epoch,hour_iso,rx_avg_bps,rx_peak_bps,tx_avg_bps,tx_peak_bps,jitter_avg_ms,latency_avg_ms,loss_avg_pct`) |
+| GET | `/api/v1/sites/{site_id}/application-health-summary?duration=...` | Site-level Application Health SLE (summary %, threshold %, hourly trend, impacted interfaces) |
+
+### Known Limitations (WAN Insights)
+
+- **14-day / 1h-interval retention** — requests older than 14 days are silently clamped server-side. When clamping occurs the response sets `clipped: true` and includes a `retention_notice` string that the UI surfaces above the charts.
+- **Application Health SLE is native on SSR** — sites without the SLE configured return `summary_pct: null`, `threshold_pct: null`, `trend: []`, `impacted_interfaces: []`. No substitution metric is used.
+- **Rate-limit handling** — 429s never reach the caller. If all tokens are exhausted, the response is HTTP 200 with `success: true` and per-section flags in `rate_limited: {bandwidth, wan_link_health, app_health}`; the UI shows a "temporarily rate-limited" banner and preserves the last successful data.
 
 ## Author
 

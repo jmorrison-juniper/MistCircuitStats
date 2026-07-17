@@ -530,6 +530,75 @@
                 </div>
             </div>
         </div>
+
+        <!-- WAN Insights (spec 001-wan-insights-metrics) -->
+        <div class="wan-insights-section mt-4 px-3" id="wanInsightsSection">
+            <div class="d-flex flex-wrap justify-content-between align-items-center mb-2">
+                <div class="chart-title mb-0">
+                    <i class="bi bi-activity"></i> WAN Insights (hourly, native)
+                    <a href="https://www.mist.com/documentation/juniper-mist-wan-assurance/"
+                       target="_blank" rel="noopener" class="ms-2 small text-info"
+                       title="Learn more about Mist WAN Insights">Learn more</a>
+                </div>
+                <div class="d-flex align-items-center">
+                    <div class="btn-group me-2" role="group" aria-label="WAN insights timeframe">
+                        <button type="button" class="btn btn-sm btn-outline-light active" onclick="filterWanInsights('24h')" id="wi-btn-24h">24h</button>
+                        <button type="button" class="btn btn-sm btn-outline-light" onclick="filterWanInsights('3d')" id="wi-btn-3d">3d</button>
+                        <button type="button" class="btn btn-sm btn-outline-light" onclick="filterWanInsights('7d')" id="wi-btn-7d">7d</button>
+                    </div>
+                    <button class="btn btn-sm btn-outline-info" onclick="exportWanInsightsCsv()" id="wi-export-btn">
+                        <i class="bi bi-download"></i> Export Hourly Metrics
+                    </button>
+                </div>
+            </div>
+            <div id="wi-retention-notice" class="alert alert-warning py-1 px-2 small mb-2" style="display:none;"></div>
+            <div id="wi-rate-limited-banner" class="alert alert-warning py-1 px-2 small mb-2" style="display:none;">
+                Some metrics are temporarily rate-limited by Mist. Try again shortly.
+            </div>
+            <div id="wi-empty-state" class="text-muted small mb-2" style="display:none;">
+                No hourly data in this window yet.
+            </div>
+
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <div class="chart-title text-center mb-2">
+                        <i class="bi bi-bar-chart-steps"></i> Hourly Rx / Tx (bps)
+                    </div>
+                    <div class="chart-container-small">
+                        <canvas id="wiHourlyBandwidthChart"></canvas>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="chart-title text-center mb-2">
+                        <i class="bi bi-graph-down"></i> Jitter / Latency / Loss (native wan_link_health)
+                    </div>
+                    <div class="chart-container-small">
+                        <canvas id="wiHourlyJllChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <div class="row g-3 mt-1">
+                <div class="col-md-4">
+                    <div class="card bg-dark text-light h-100">
+                        <div class="card-body">
+                            <div class="text-muted small">Application Health % <span class="text-info" title="Native Mist Application Health SLE (SSR)">SLE</span></div>
+                            <div class="display-6 fw-bold" id="wi-app-health-pct">—</div>
+                            <div class="small">Goal: <span id="wi-app-health-threshold">—</span></div>
+                            <div class="small mt-1" id="wi-app-health-port-impact"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-8">
+                    <div class="chart-title text-center mb-2">
+                        <i class="bi bi-heart-pulse"></i> Application Health % — hourly trend
+                    </div>
+                    <div class="chart-container-small">
+                        <canvas id="wiAppHealthTrendChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Peer Paths Modal -->
@@ -995,6 +1064,13 @@
         // Chart modal functions
         let trafficChartRateInstance = null;
         let trafficChartDataInstance = null;
+
+        // WAN Insights (spec 001-wan-insights-metrics)
+        let wiHourlyBandwidthInstance = null;
+        let wiHourlyJllInstance = null;
+        let wiAppHealthTrendInstance = null;
+        let currentWanInsightsDuration = '24h';
+        let currentWanInsightsData = null;
         
         function closeChartModal() {
             document.getElementById('chartModal').style.display = 'none';
@@ -1007,9 +1083,13 @@
                 trafficChartDataInstance.destroy();
                 trafficChartDataInstance = null;
             }
+            if (wiHourlyBandwidthInstance) { wiHourlyBandwidthInstance.destroy(); wiHourlyBandwidthInstance = null; }
+            if (wiHourlyJllInstance) { wiHourlyJllInstance.destroy(); wiHourlyJllInstance = null; }
+            if (wiAppHealthTrendInstance) { wiAppHealthTrendInstance.destroy(); wiAppHealthTrendInstance = null; }
             // Clear cached data
             cachedTrafficData = null;
             currentChartContext = null;
+            currentWanInsightsData = null;
         }
         
         function updateChartFilterButtons() {
@@ -1047,9 +1127,14 @@
             
             // Store context for filtering/re-fetching
             currentChartContext = { siteId, deviceId, portId, gatewayName };
-            
+
             // Fetch data for the current view
             await fetchAndDisplayTraffic('7d');
+
+            // Reset + fetch WAN Insights (hourly, native)
+            currentWanInsightsDuration = '24h';
+            updateWanInsightsButtons();
+            fetchAndDisplayWanInsights('24h');
         }
         
         async function fetchAndDisplayTraffic(viewDuration) {
@@ -1101,6 +1186,170 @@
                 console.error('Error fetching traffic data:', error);
                 showToast('Failed to load traffic chart', 'danger');
             }
+        }
+
+        // ---- WAN Insights (hourly, native) ----
+
+        function updateWanInsightsButtons() {
+            ['24h', '3d', '7d'].forEach(dur => {
+                const btn = document.getElementById(`wi-btn-${dur}`);
+                if (btn) btn.classList.toggle('active', dur === currentWanInsightsDuration);
+            });
+        }
+
+        function filterWanInsights(duration) {
+            currentWanInsightsDuration = duration;
+            updateWanInsightsButtons();
+            fetchAndDisplayWanInsights(duration);
+        }
+
+        async function fetchAndDisplayWanInsights(duration) {
+            if (!currentChartContext) return;
+            const { siteId, deviceId, portId } = currentChartContext;
+
+            const noticeEl = document.getElementById('wi-retention-notice');
+            const rlBanner = document.getElementById('wi-rate-limited-banner');
+            const emptyEl = document.getElementById('wi-empty-state');
+            noticeEl.style.display = 'none';
+            rlBanner.style.display = 'none';
+            emptyEl.style.display = 'none';
+
+            try {
+                const url = `/api/v1/sites/${siteId}/gateways/${deviceId}/ports/${encodeURIComponent(portId)}/hourly?duration=${duration}`;
+                const resp = await fetch(url);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const body = await resp.json();
+                if (!body.success) throw new Error(body.error || 'fetch failed');
+
+                currentWanInsightsData = body;
+
+                if (body.clipped && body.retention_notice) {
+                    noticeEl.textContent = body.retention_notice;
+                    noticeEl.style.display = 'block';
+                }
+                const rl = body.rate_limited || {};
+                if (rl.bandwidth || rl.wan_link_health || rl.app_health) {
+                    rlBanner.style.display = 'block';
+                }
+                if (!body.hourly || body.hourly.length === 0) {
+                    emptyEl.style.display = 'block';
+                }
+
+                renderWiHourlyBandwidth(body.hourly || []);
+                renderWiHourlyJll(body.hourly || []);
+                renderWiAppHealth(body);
+            } catch (err) {
+                console.error('WAN Insights fetch failed:', err);
+                showToast('Failed to load WAN Insights', 'danger');
+            }
+        }
+
+        function _wiLabels(hourly) {
+            return hourly.map(r => r.hour_iso || '');
+        }
+
+        function renderWiHourlyBandwidth(hourly) {
+            const ctx = document.getElementById('wiHourlyBandwidthChart');
+            if (!ctx) return;
+            if (wiHourlyBandwidthInstance) wiHourlyBandwidthInstance.destroy();
+            wiHourlyBandwidthInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: _wiLabels(hourly),
+                    datasets: [
+                        { label: 'Rx avg (bps)', data: hourly.map(r => r.rx_bps), borderColor: '#4dabf7', backgroundColor: 'rgba(77,171,247,0.1)', tension: 0.2, spanGaps: true },
+                        { label: 'Tx avg (bps)', data: hourly.map(r => r.tx_bps), borderColor: '#e0367e', backgroundColor: 'rgba(224,54,126,0.1)', tension: 0.2, spanGaps: true },
+                        { label: 'Rx peak (bps)', data: hourly.map(r => r.max_rx_bps), borderColor: '#4dabf7', borderDash: [4,3], pointRadius: 0, tension: 0.2, spanGaps: true },
+                        { label: 'Tx peak (bps)', data: hourly.map(r => r.max_tx_bps), borderColor: '#e0367e', borderDash: [4,3], pointRadius: 0, tension: 0.2, spanGaps: true },
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { legend: { labels: { color: '#e0e0e0' } } },
+                    scales: {
+                        x: { ticks: { color: '#aaa', maxTicksLimit: 8 } },
+                        y: { ticks: { color: '#aaa' }, title: { display: true, text: 'bps', color: '#aaa' } }
+                    }
+                }
+            });
+        }
+
+        function renderWiHourlyJll(hourly) {
+            const ctx = document.getElementById('wiHourlyJllChart');
+            if (!ctx) return;
+            if (wiHourlyJllInstance) wiHourlyJllInstance.destroy();
+            wiHourlyJllInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: _wiLabels(hourly),
+                    datasets: [
+                        { label: 'Jitter (ms)', data: hourly.map(r => r.avg_jitter_ms), borderColor: '#ffd43b', tension: 0.2, spanGaps: true, yAxisID: 'y' },
+                        { label: 'Latency (ms)', data: hourly.map(r => r.avg_latency_ms), borderColor: '#8ce99a', tension: 0.2, spanGaps: true, yAxisID: 'y' },
+                        { label: 'Loss (%)', data: hourly.map(r => r.avg_loss_pct), borderColor: '#ff6b6b', tension: 0.2, spanGaps: true, yAxisID: 'y1' },
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { legend: { labels: { color: '#e0e0e0' } } },
+                    scales: {
+                        x: { ticks: { color: '#aaa', maxTicksLimit: 8 } },
+                        y: { ticks: { color: '#aaa' }, title: { display: true, text: 'ms', color: '#aaa' }, position: 'left' },
+                        y1: { ticks: { color: '#aaa' }, title: { display: true, text: '%', color: '#aaa' }, position: 'right', grid: { drawOnChartArea: false } }
+                    }
+                }
+            });
+        }
+
+        function renderWiAppHealth(body) {
+            const pctEl = document.getElementById('wi-app-health-pct');
+            const thrEl = document.getElementById('wi-app-health-threshold');
+            const portImpactEl = document.getElementById('wi-app-health-port-impact');
+            const pah = body.port_app_health;
+            if (pah && pah.summary_pct != null) {
+                pctEl.textContent = `${Number(pah.summary_pct).toFixed(1)}%`;
+                thrEl.textContent = pah.threshold_pct != null ? `${Number(pah.threshold_pct).toFixed(1)}%` : '—';
+                portImpactEl.textContent = pah.impacted
+                    ? 'This port appears in impacted-interfaces for the window.'
+                    : 'No impact recorded for this port in the window.';
+                portImpactEl.className = pah.impacted ? 'small mt-1 text-warning' : 'small mt-1 text-success';
+            } else {
+                pctEl.textContent = '—';
+                thrEl.textContent = '—';
+                portImpactEl.textContent = 'Application Health SLE unavailable for this site.';
+                portImpactEl.className = 'small mt-1 text-muted';
+            }
+
+            const trend = body.hourly_app_health || [];
+            const ctx = document.getElementById('wiAppHealthTrendChart');
+            if (!ctx) return;
+            if (wiAppHealthTrendInstance) wiAppHealthTrendInstance.destroy();
+            wiAppHealthTrendInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: trend.map(t => {
+                        const d = new Date((t.timestamp || 0) * 1000);
+                        return d.toISOString().replace(':00.000Z', 'Z').slice(0, 16) + 'Z';
+                    }),
+                    datasets: [
+                        { label: 'App Health %', data: trend.map(t => t.pct), borderColor: '#63e6be', tension: 0.2, spanGaps: true }
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { legend: { labels: { color: '#e0e0e0' } } },
+                    scales: {
+                        x: { ticks: { color: '#aaa', maxTicksLimit: 8 } },
+                        y: { ticks: { color: '#aaa' }, min: 0, max: 100, title: { display: true, text: '%', color: '#aaa' } }
+                    }
+                }
+            });
+        }
+
+        function exportWanInsightsCsv() {
+            if (!currentChartContext) return;
+            const { siteId, deviceId, portId } = currentChartContext;
+            const url = `/api/v1/sites/${siteId}/gateways/${deviceId}/ports/${encodeURIComponent(portId)}/hourly/export?duration=${currentWanInsightsDuration}`;
+            window.location.href = url;
         }
         
         function createTrafficCharts(data, portId) {
