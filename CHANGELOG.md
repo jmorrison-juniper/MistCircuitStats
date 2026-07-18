@@ -37,6 +37,26 @@ during the pre-1.0 phase (breaking changes may still land in minor bumps).
   #30).
 
 ### Changed
+- **Unified Mist API access under the `mistapi` SDK.** Retired the last 7
+  direct-REST call sites in `mist_connection.py` and `app.py` so every Mist
+  Cloud call now funnels through `MistConnection._handle_rate_limit_response`
+  and inherits the shared multi-token 60-second per-token 429 rotation:
+  - `get_vpn_peer_stats` → `searchOrgPeerPathStats`
+  - `_insights_gateway_stats` → `getSiteInsightMetricsForGateway`
+  - `_insights_device_wan_link_health` →
+    `getSiteInsightMetricsForDevice(metric="wan_link_health")`
+  - `_sle_app_health_get` → `getSiteSleSummaryTrend` /
+    `listSiteSleImpactedInterfaces` / `getSiteSleThreshold`
+  - `app.py::get_port_traffic` (legacy chart-modal route) now delegates to a
+    new `MistConnection.get_gateway_port_traffic_series` wrapper backed by
+    `getSiteInsightMetricsForGateway` — meaning the click-a-cell chart popup
+    on the main gateway table finally benefits from shared token rotation
+    instead of bypassing it with an inline `requests.get`.
+
+  Response shapes served to `templates/index.html` (both JSON envelopes and
+  CSV export columns) remain byte-identical modulo timestamps and rate-limit
+  counters. `import requests` is dropped from both files; `requests` remains
+  only as a transitive dependency of Flask / `mistapi`.
 - **Backfilled docstrings across the codebase** to clear the ≥90 %
   interrogate floor and satisfy pydoclint. Every public and private function
   in `app.py` and `mist_connection.py` now carries a Google-style docstring

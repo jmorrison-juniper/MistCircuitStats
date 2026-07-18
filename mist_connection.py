@@ -897,18 +897,25 @@ class MistConnection:
             raise
 
     def get_vpn_peer_stats(self, site_id: str, device_mac: str) -> dict:
-        """
-        Get VPN peer path statistics for a gateway
+        """Get VPN peer path statistics for a gateway.
+
+        Why: closes the last direct-REST call in this module by routing the
+        `POST/GET /orgs/{org_id}/stats/vpn_peers/search` call through the
+        `mistapi.api.v1.orgs.stats.searchOrgPeerPathStats` SDK function, so it
+        inherits the shared multi-token 60-second per-token 429 rotation from
+        `_handle_rate_limit_response`.
 
         Args:
-            site_id: Site ID
-            device_mac: Device MAC address
+            site_id: Mist site UUID scoping the peer-path search.
+            device_mac: 12-char gateway MAC address (no separators).
 
         Returns:
-            Dictionary with peer path statistics grouped by port_id
+            On 200: ``{"success": True, "peers_by_port": {port_id: [peer, ...]},
+            "total_peers": int}``. On all-tokens-cooling-down or other non-200:
+            the same shape with ``success`` False, ``peers_by_port`` empty, and
+            ``total_peers`` zero, plus ``rate_limited`` True for the cooldown
+            case (byte-identical to the pre-migration envelope).
         """
-        import requests
-
         try:
             if not self.org_id:
                 raise ValueError("Organization ID is required")
@@ -918,32 +925,23 @@ class MistConnection:
                 logger.debug("Skipping VPN peer stats - all tokens rate limited")
                 return {"success": False, "rate_limited": True, "peers_by_port": {}, "total_peers": 0}
 
-            headers = {"Authorization": f"Token {self.api_token}", "Content-Type": "application/json"}
-
-            url = f"https://{self.host}/api/v1/orgs/{self.org_id}/stats/vpn_peers/search"
-            params = {"site_id": site_id, "mac": device_mac}
-
-            response = requests.get(url, headers=headers, params=params, timeout=30)
-
-            if response.status_code == 429:
-                # Mark token as rate limited and try to switch
-                switched = self._mark_token_rate_limited()
-                if switched:
-                    # Retry with new token
-                    headers["Authorization"] = f"Token {self.api_token}"
-                    response = requests.get(url, headers=headers, params=params, timeout=30)
-                    if response.status_code == 429:
-                        self._mark_token_rate_limited()
-
+            response = mistapi.api.v1.orgs.stats.searchOrgPeerPathStats(
+                self.apisession, self.org_id, mac=device_mac, site_id=site_id
+            )
+            if self._handle_rate_limit_response(response):
+                # _mark_token_rate_limited already rotated self.apisession
+                response = mistapi.api.v1.orgs.stats.searchOrgPeerPathStats(
+                    self.apisession, self.org_id, mac=device_mac, site_id=site_id
+                )
                 if response.status_code != 200:
                     return {"success": False, "rate_limited": True, "peers_by_port": {}, "total_peers": 0}
 
             if response.status_code == 200:
-                data = response.json()
+                data = response.data or {}
                 results = data.get("results", [])
 
                 # Group peer paths by port_id
-                peers_by_port = {}
+                peers_by_port: dict = {}
                 for peer in results:
                     port_id = peer.get("port_id", "")
                     if port_id not in peers_by_port:
@@ -974,6 +972,90 @@ class MistConnection:
             logger.warning(f"Error fetching VPN peer stats for device {device_mac}: {str(e)}")
             return {"success": False, "peers_by_port": {}, "total_peers": 0}
 
+    def get_gateway_port_traffic_series(
+        self,
+        site_id: str,
+        gateway_id: str,
+        port_id: str,
+        start: int,
+        end: int,
+        interval: int = 600,
+    ) -> dict:
+        """Fetch a rx_bps/tx_bps time series for one gateway port (chart-modal source).
+
+        Why: replaces the inline ``requests.get`` in ``app.py::get_port_traffic``
+        (the legacy chart-modal route) with a single SDK-backed wrapper so the
+        call inherits the shared multi-token 60-second per-token 429 rotation
+        from ``_handle_rate_limit_response``. Uses the same
+        ``mistapi.api.v1.sites.insights.getSiteInsightMetricsForGateway`` path
+        as ``_insights_gateway_stats`` but with an integer interval (seconds)
+        and a fixed ``metrics="rx_bps,tx_bps"`` argument, matching what the
+        pre-migration route sent to Mist.
+
+        The returned envelope is ``{"success": bool, "data": {"timestamps":
+        [...], "rx_bps": [...], "tx_bps": [...]}}`` — byte-identical to the
+        pre-migration route body so ``templates/index.html`` reads it unchanged.
+
+        Args:
+            site_id: Mist site UUID.
+            gateway_id: Gateway device UUID.
+            port_id: WAN port identifier (e.g. "ge-0/0/0").
+            start: Epoch seconds, inclusive.
+            end: Epoch seconds, exclusive.
+            interval: Bucket size in seconds (default 600 = 10-minute buckets).
+
+        Returns:
+            On 200: ``{"success": True, "data": {"timestamps": list[int],
+            "rx_bps": list, "tx_bps": list}}``. On all-tokens-cooling-down
+            or other non-200: ``{"success": False, "error": str}``.
+        """
+        if self._is_rate_limited():
+            return {"success": False, "error": "Rate limited on all tokens"}
+
+        try:
+            response = mistapi.api.v1.sites.insights.getSiteInsightMetricsForGateway(
+                self.apisession,
+                site_id,
+                gateway_id,
+                "rx_bps,tx_bps",
+                port_id=port_id,
+                interval=interval,
+                start=start,
+                end=end,
+            )
+            if self._handle_rate_limit_response(response):
+                # _mark_token_rate_limited already rotated self.apisession
+                response = mistapi.api.v1.sites.insights.getSiteInsightMetricsForGateway(
+                    self.apisession,
+                    site_id,
+                    gateway_id,
+                    "rx_bps,tx_bps",
+                    port_id=port_id,
+                    interval=interval,
+                    start=start,
+                    end=end,
+                )
+                if response.status_code != 200:
+                    return {"success": False, "error": "Rate limited after retry"}
+
+            if response.status_code == 200:
+                data = response.data or {}
+                rx = data.get("rx_bps", []) or []
+                tx = data.get("tx_bps", []) or []
+                # Rebuild timestamps at requested interval; frontend expects list-of-int seconds
+                result = {
+                    "timestamps": [start + (i * interval) for i in range(len(rx))],
+                    "rx_bps": rx,
+                    "tx_bps": tx,
+                }
+                return {"success": True, "data": result}
+
+            logger.warning(f"port traffic series API error {response.status_code} gateway={gateway_id} port={port_id}")
+            return {"success": False, "error": f"API error: {response.status_code}"}
+        except Exception as e:
+            logger.warning(f"port traffic series error gateway={gateway_id} port={port_id}: {e}")
+            return {"success": False, "error": str(e)}
+
     # ------------------------------------------------------------------
     # WAN Insights feature — hourly bandwidth, wan_link_health, App Health SLE
     # ------------------------------------------------------------------
@@ -988,43 +1070,60 @@ class MistConnection:
         metrics: str,
         interval_param: str = "1h",
     ) -> dict:
-        """
-        Shared helper: GET /api/v1/sites/{site_id}/insights/gateway/{device_id}/stats
-        with port_id filter and configurable interval. Returns
-            {'success': bool, 'rate_limited': bool, 'data': dict-or-None}
-        Never raises for 429; funnels through _mark_token_rate_limited.
-        """
-        import requests
+        """Fetch gateway insight metrics for one WAN port via the mistapi SDK.
 
+        Why: routes ``GET /sites/{site_id}/insights/gateway/{device_id}/stats``
+        through ``mistapi.api.v1.sites.insights.getSiteInsightMetricsForGateway``
+        so the call inherits the shared multi-token 60-second per-token 429
+        rotation from ``_handle_rate_limit_response``. Preserves the 14-day
+        1h-interval retention window enforced upstream by the Mist API.
+
+        Args:
+            site_id: Mist site UUID.
+            device_id: Gateway device UUID.
+            port_id: WAN port identifier (e.g. "ge-0/0/0").
+            start: Epoch seconds, inclusive.
+            end: Epoch seconds, exclusive.
+            metrics: Comma-separated Mist metric names (e.g. "tx_bps,rx_bps").
+            interval_param: Interval string for bucket size (e.g. "1h", "10m").
+
+        Returns:
+            On 200: ``{"success": True, "rate_limited": False, "data": dict}``.
+            On all-tokens-cooling-down: ``{"success": False, "rate_limited":
+            True, "data": None}``. On other non-200 or transport error:
+            ``{"success": False, "rate_limited": False, "data": None}``.
+        """
         if self._is_rate_limited():
             return {"success": False, "rate_limited": True, "data": None}
 
-        headers = {"Authorization": f"Token {self.api_token}", "Content-Type": "application/json"}
-        url = f"https://{self.host}/api/v1/sites/{site_id}/insights/gateway/{device_id}/stats"
-        params = {
-            "metrics": metrics,
-            "port_id": port_id,
-            "interval": interval_param,
-            "start": start,
-            "end": end,
-        }
-
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=60)
-
-            if response.status_code == 429:
-                switched = self._mark_token_rate_limited()
-                if switched:
-                    headers["Authorization"] = f"Token {self.api_token}"
-                    response = requests.get(url, headers=headers, params=params, timeout=60)
-                    if response.status_code == 429:
-                        self._mark_token_rate_limited()
-
+            response = mistapi.api.v1.sites.insights.getSiteInsightMetricsForGateway(
+                self.apisession,
+                site_id,
+                device_id,
+                metrics,
+                port_id=port_id,
+                interval=interval_param,
+                start=start,
+                end=end,
+            )
+            if self._handle_rate_limit_response(response):
+                # _mark_token_rate_limited already rotated self.apisession
+                response = mistapi.api.v1.sites.insights.getSiteInsightMetricsForGateway(
+                    self.apisession,
+                    site_id,
+                    device_id,
+                    metrics,
+                    port_id=port_id,
+                    interval=interval_param,
+                    start=start,
+                    end=end,
+                )
                 if response.status_code != 200:
                     return {"success": False, "rate_limited": True, "data": None}
 
             if response.status_code == 200:
-                return {"success": True, "rate_limited": False, "data": response.json()}
+                return {"success": True, "rate_limited": False, "data": response.data}
 
             logger.warning(f"insights/gateway stats {response.status_code} metrics={metrics} port={port_id}")
             return {"success": False, "rate_limited": False, "data": None}
@@ -1041,39 +1140,66 @@ class MistConnection:
         end: int,
         interval_param: str = "1h",
     ) -> dict:
-        """
-        GET /api/v1/sites/{site_id}/insights/device/{mac}/wan_link_health
+        """Fetch WAN link health samples for one gateway port via the mistapi SDK.
 
-        wan_link_health has scope=device (not gateway) — metric goes in the URL path
-        and the identifier is the 12-char MAC (no separators), derived from device_id.
-        Returns {'success': bool, 'rate_limited': bool, 'data': dict|None}.
-        """
-        import requests
+        Why: routes ``GET /sites/{site_id}/insights/device/{mac}/wan_link_health``
+        through ``mistapi.api.v1.sites.insights.getSiteInsightMetricsForDevice``
+        with ``metric="wan_link_health"`` so it inherits the shared multi-token
+        60-second per-token 429 rotation from ``_handle_rate_limit_response``.
 
+        Scope quirk: ``wan_link_health`` is a *device*-scoped metric — the
+        identifier in the URL path is the 12-char MAC (no separators), NOT the
+        gateway device UUID. This method targets ``getSiteInsightMetricsForDevice``
+        (not the ``ForGateway`` variant), and derives the MAC from ``device_id``
+        via ``device_id.replace("-", "")[-12:]``. Retention: 14 days at 1h.
+
+        Args:
+            site_id: Mist site UUID.
+            device_id: Gateway device UUID; the trailing 12 hex chars become the MAC.
+            port_id: WAN port identifier (e.g. "ge-0/0/0").
+            start: Epoch seconds, inclusive.
+            end: Epoch seconds, exclusive.
+            interval_param: Interval string for bucket size (e.g. "1h", "10m").
+
+        Returns:
+            On 200: ``{"success": True, "rate_limited": False, "data": dict}``.
+            On all-tokens-cooling-down: ``{"success": False, "rate_limited":
+            True, "data": None}``. On other non-200 or transport error:
+            ``{"success": False, "rate_limited": False, "data": None}``.
+        """
         if self._is_rate_limited():
             return {"success": False, "rate_limited": True, "data": None}
 
         mac = device_id.replace("-", "")[-12:]
-        headers = {"Authorization": f"Token {self.api_token}", "Content-Type": "application/json"}
-        url = f"https://{self.host}/api/v1/sites/{site_id}/insights/device/{mac}/wan_link_health"
-        params = {"port_id": port_id, "interval": interval_param, "start": start, "end": end}
 
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=60)
-
-            if response.status_code == 429:
-                switched = self._mark_token_rate_limited()
-                if switched:
-                    headers["Authorization"] = f"Token {self.api_token}"
-                    response = requests.get(url, headers=headers, params=params, timeout=60)
-                    if response.status_code == 429:
-                        self._mark_token_rate_limited()
-
+            response = mistapi.api.v1.sites.insights.getSiteInsightMetricsForDevice(
+                self.apisession,
+                site_id,
+                "wan_link_health",
+                mac,
+                port_id=port_id,
+                interval=interval_param,
+                start=start,
+                end=end,
+            )
+            if self._handle_rate_limit_response(response):
+                # _mark_token_rate_limited already rotated self.apisession
+                response = mistapi.api.v1.sites.insights.getSiteInsightMetricsForDevice(
+                    self.apisession,
+                    site_id,
+                    "wan_link_health",
+                    mac,
+                    port_id=port_id,
+                    interval=interval_param,
+                    start=start,
+                    end=end,
+                )
                 if response.status_code != 200:
                     return {"success": False, "rate_limited": True, "data": None}
 
             if response.status_code == 200:
-                return {"success": True, "rate_limited": False, "data": response.json()}
+                return {"success": True, "rate_limited": False, "data": response.data}
 
             logger.warning(f"insights/device wan_link_health {response.status_code} mac={mac} port={port_id}")
             return {"success": False, "rate_limited": False, "data": None}
@@ -1267,37 +1393,72 @@ class MistConnection:
         return {"success": True, "rate_limited": False, "samples": samples}
 
     def _sle_app_health_get(self, site_id: str, sub_path: str, params: dict | None = None) -> dict:
-        """
-        Shared helper: GET /api/v1/sites/{site_id}/sle/site/{site_id}/metric/application-health/{sub_path}
-        Returns {'success': bool, 'rate_limited': bool, 'data': dict|list|None}.
-        """
-        import requests
+        """Fetch one of three Application Health SLE endpoints via the mistapi SDK.
 
+        Why: routes the three ``/sites/{site_id}/sle/site/{site_id}/metric/
+        application-health/{sub_path}`` calls (``summary-trend``,
+        ``impacted-interfaces``, ``threshold``) through the SDK so they inherit
+        the shared multi-token 60-second per-token 429 rotation from
+        ``_handle_rate_limit_response``. Dispatches on ``sub_path``:
+
+        * ``summary-trend`` → ``getSiteSleSummaryTrend``. Used **instead of**
+          ``/summary`` because ``getSiteSleSummary`` returns HTTP 400 on the
+          target org for the ``application-health`` metric. The SDK function
+          does NOT accept ``interval`` (verified via ``inspect.signature``);
+          the previously-passed ``interval=3600`` was Mist's API default so
+          bucket cadence is unchanged.
+        * ``impacted-interfaces`` → ``listSiteSleImpactedInterfaces``.
+        * ``threshold`` → ``getSiteSleThreshold``.
+
+        Args:
+            site_id: Mist site UUID. Used both as the site scope and as the
+                ``scope_id`` (site-scoped SLE).
+            sub_path: One of ``"summary-trend"``, ``"impacted-interfaces"``,
+                ``"threshold"``.
+            params: Optional dict of query params; only ``start`` and ``end``
+                are forwarded to the SDK (``interval`` is dropped for
+                ``summary-trend`` as noted above). ``threshold`` ignores params.
+
+        Returns:
+            On 200: ``{"success": True, "rate_limited": False, "data": dict|list}``.
+            On all-tokens-cooling-down: ``{"success": False, "rate_limited":
+            True, "data": None}``. On other non-200 or transport error:
+            ``{"success": False, "rate_limited": False, "data": None}``.
+        """
         if self._is_rate_limited():
             return {"success": False, "rate_limited": True, "data": None}
 
-        headers = {"Authorization": f"Token {self.api_token}", "Content-Type": "application/json"}
-        url = f"https://{self.host}/api/v1/sites/{site_id}" f"/sle/site/{site_id}/metric/application-health/{sub_path}"
+        params = params or {}
+        start = params.get("start")
+        end = params.get("end")
+
+        def _call() -> object:
+            """Invoke the correct SDK function based on ``sub_path`` (closure captures locals)."""
+            if sub_path == "summary-trend":
+                # getSiteSleSummaryTrend does not accept `interval` — drop it (was API default 3600 anyway)
+                return mistapi.api.v1.sites.sle.getSiteSleSummaryTrend(
+                    self.apisession, site_id, "site", site_id, "application-health", start=start, end=end
+                )
+            if sub_path == "impacted-interfaces":
+                return mistapi.api.v1.sites.sle.listSiteSleImpactedInterfaces(
+                    self.apisession, site_id, "site", site_id, "application-health", start=start, end=end
+                )
+            if sub_path == "threshold":
+                return mistapi.api.v1.sites.sle.getSiteSleThreshold(
+                    self.apisession, site_id, "site", site_id, "application-health"
+                )
+            raise ValueError(f"Unsupported App Health SLE sub_path: {sub_path}")
 
         try:
-            response = requests.get(url, headers=headers, params=params or {}, timeout=60)
-
-            if response.status_code == 429:
-                switched = self._mark_token_rate_limited()
-                if switched:
-                    headers["Authorization"] = f"Token {self.api_token}"
-                    response = requests.get(url, headers=headers, params=params or {}, timeout=60)
-                    if response.status_code == 429:
-                        self._mark_token_rate_limited()
-
+            response = _call()
+            if self._handle_rate_limit_response(response):
+                # _mark_token_rate_limited already rotated self.apisession
+                response = _call()
                 if response.status_code != 200:
                     return {"success": False, "rate_limited": True, "data": None}
 
             if response.status_code == 200:
-                try:
-                    return {"success": True, "rate_limited": False, "data": response.json()}
-                except ValueError:
-                    return {"success": True, "rate_limited": False, "data": None}
+                return {"success": True, "rate_limited": False, "data": response.data}
 
             # 400 or other = unavailable, treat as no-data (spec: return HTTP 200 unavailable case)
             logger.info(f"App Health SLE {sub_path} returned {response.status_code} for site {site_id}")
