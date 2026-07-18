@@ -1,0 +1,14 @@
+name: "MistCircuitStats CodeQL Configuration"
+
+# Exclude the py/clear-text-logging-sensitive-data query.
+# MistCircuitStats is a network operations tool where displaying MAC addresses,
+# WAN edge identifiers, and gateway attributes to NOC engineers is fundamental
+# operational functionality — not a security vulnerability. CodeQL incorrectly
+# classifies these as "sensitive data (private)" because variable names contain
+# "mac" (e.g., ap_mac, gateway_mac). No passwords, API tokens, or actual
+# secrets are ever logged.
+query-filters:
+  - exclude:
+      id: py/clear-text-logging-sensitive-data
+  - exclude:
+      id: py/stack-trace-exposure

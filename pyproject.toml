@@ -1,0 +1,24 @@
+[project]
+name = "mistcircuitstats"
+version = "0.1.0"
+description = "Circuit and WAN insights web dashboard for Juniper Mist"
+requires-python = ">=3.13"
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+extend-exclude = [".specify", "docs", "specs", "templates"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+# Project style uses f-string logging (G004) — allowed, so the G family is not selected.
+# E402: module-import-not-at-top — intentional in app.py (env vars must load before mistapi import).
+ignore = ["E402"]
+
+[tool.black]
+line-length = 120
+target-version = ["py313"]
+extend-exclude = "\\.specify|docs|specs|templates"
+
+[tool.bandit]
+exclude_dirs = [".github", ".specify", "docs", "specs", "templates"]

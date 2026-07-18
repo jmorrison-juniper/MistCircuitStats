@@ -1,0 +1,227 @@
+name: Quality Gates
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  PYTHON_VERSION: '3.13'
+
+concurrency:
+  group: quality-gates-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── LINT & FORMAT ──────────────────────────────────────────────
+  ruff:
+    name: "Ruff (lint)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install ruff
+      - run: ruff check .
+
+  black:
+    name: "Black (format check)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install black
+      - run: black --check .
+
+  # ── SECURITY ──────────────────────────────────────────────────
+  bandit:
+    name: "Bandit (security)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install bandit
+      - run: bandit -r . -ll -x ./.github,./.specify,./docs,./specs,./templates
+
+  pip_audit:
+    name: "pip-audit (CVE scan)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install pip-audit
+      - run: pip-audit -r requirements.txt
+
+  # ── CODE QUALITY ──────────────────────────────────────────────
+  radon:
+    name: "Radon (complexity)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install radon
+      - name: Check cyclomatic complexity
+        run: |
+          radon cc . -a -nb --exclude '.github/*,.specify/*,docs/*,specs/*,templates/*'
+          radon cc . -j --exclude '.github/*,.specify/*,docs/*,specs/*,templates/*' | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          bad = []
+          for path, blocks in data.items():
+              for b in blocks:
+                  if b['complexity'] > 15:
+                      bad.append(f\"{path}:{b['lineno']} {b['name']} CC={b['complexity']}\")
+          if bad:
+              print('Cyclomatic complexity violations (>15):')
+              for item in bad:
+                  print(f'  {item}')
+              sys.exit(1)
+          print('All functions within complexity threshold.')
+          "
+
+  vulture:
+    name: "Vulture (dead code)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install vulture
+      - run: vulture . --min-confidence 90 --exclude '.github,.specify,docs,specs,templates'
+
+  # ── FAILURE → GITHUB ISSUES ───────────────────────────────────
+  create_failure_issues:
+    name: "Create issues for failures"
+    needs:
+      - ruff
+      - black
+      - bandit
+      - pip_audit
+      - radon
+      - vulture
+    if: ${{ always() && github.ref == 'refs/heads/main' && contains(needs.*.result, 'failure') }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure issue labels exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create "bug" --color "d73a4a" --description "Something isn't working" 2>/dev/null || true
+          gh label create "ci" --color "0e8a16" --description "CI/CD pipeline" 2>/dev/null || true
+          gh label create "quality-gate" --color "fbca04" --description "Quality gate failure" 2>/dev/null || true
+      - name: Create issues for each failed gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          declare -A RESULTS
+          RESULTS[ruff]="${{ needs.ruff.result }}"
+          RESULTS[black]="${{ needs.black.result }}"
+          RESULTS[bandit]="${{ needs.bandit.result }}"
+          RESULTS[pip_audit]="${{ needs.pip_audit.result }}"
+          RESULTS[radon]="${{ needs.radon.result }}"
+          RESULTS[vulture]="${{ needs.vulture.result }}"
+
+          for gate in "${!RESULTS[@]}"; do
+            result="${RESULTS[$gate]}"
+            if [ "$result" = "failure" ]; then
+              TITLE="CI: quality-gate \`${gate}\` failed"
+
+              EXISTING=$(gh issue list --state open --search "CI: quality-gate ${gate} failed" --json number --jq 'length')
+              if [ "$EXISTING" != "0" ]; then
+                echo "Issue already exists for gate: ${gate} (skipping)"
+                continue
+              fi
+
+              BODY="## Quality Gate Failure
+
+          **Gate**: \`${gate}\`
+          **Branch**: \`${{ github.ref_name }}\`
+          **Commit**: \`${{ github.sha }}\`
+          **Workflow run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          ### Action Required
+          Review the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details and fix the failing gate.
+
+          _Auto-generated by Quality Gates CI_"
+
+              gh issue create \
+                --title "$TITLE" \
+                --label "bug,ci,quality-gate" \
+                --body "$BODY"
+              echo "Created issue for failed gate: ${gate}"
+            fi
+          done
+
+  # ── SUCCESS → AUTO-CLOSE resolved quality-gate issues ─────────
+  close_resolved_issues:
+    name: "Close resolved quality-gate issues"
+    needs:
+      - ruff
+      - black
+      - bandit
+      - pip_audit
+      - radon
+      - vulture
+    if: ${{ always() && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Close issues for passing gates
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          declare -A RESULTS
+          RESULTS[ruff]="${{ needs.ruff.result }}"
+          RESULTS[black]="${{ needs.black.result }}"
+          RESULTS[bandit]="${{ needs.bandit.result }}"
+          RESULTS[pip_audit]="${{ needs.pip_audit.result }}"
+          RESULTS[radon]="${{ needs.radon.result }}"
+          RESULTS[vulture]="${{ needs.vulture.result }}"
+
+          for gate in "${!RESULTS[@]}"; do
+            result="${RESULTS[$gate]}"
+            if [ "$result" = "success" ]; then
+              SEARCH="CI: quality-gate ${gate} failed"
+              ISSUES=$(gh issue list --state open --label "quality-gate" --search "$SEARCH" --json number --jq '.[].number')
+              for issue_number in $ISSUES; do
+                gh issue close "$issue_number" \
+                  --reason completed \
+                  --comment "Auto-closed: \`${gate}\` gate now passing on \`${{ github.ref_name }}\` (commit \`${{ github.sha }}\`)."
+                echo "Closed issue #${issue_number} (gate: ${gate})"
+              done
+            fi
+          done
