@@ -93,9 +93,8 @@ jobs:
         run: |
           TAG="v${VERSION}"
           IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
-          git tag -a "${TAG}" -m "Release ${TAG}"
-          git push origin "${TAG}"
           gh release create "${TAG}" \
+            --target "${GITHUB_SHA}" \
             --title "${TAG}" \
             --generate-notes \
             --notes "**Container image:** \`${IMAGE}\` (also tagged \`latest\`)"
