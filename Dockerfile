@@ -1,5 +1,5 @@
-# Use Python 3.11 slim image for smaller size
-FROM python:3.11-slim
+# Use Python 3.13 slim image (matches pyproject requires-python >=3.13 and CI matrix)
+FROM python:3.13-slim
 
 # Set version label (YY.MM.DD.HH.MM format)
 ARG BUILD_DATE
