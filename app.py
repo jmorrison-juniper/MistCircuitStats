@@ -424,6 +424,4 @@ def get_site_app_health_summary(site_id):
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    app.run(
-        host="0.0.0.0", port=port, debug=(LOG_LEVEL == "DEBUG")
-    )  # nosec B104 - container entrypoint binds all interfaces intentionally
+    app.run(host="0.0.0.0", port=port, debug=(LOG_LEVEL == "DEBUG"))  # nosec B104  # noqa: E501  # fmt: skip
