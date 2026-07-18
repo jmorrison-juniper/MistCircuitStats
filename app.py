@@ -14,10 +14,10 @@ from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, render_template, request
 
 from mist_connection import (
-    HOUR_INTERVAL,
     MistConnection,
     clip_to_retention_window,
     duration_to_seconds,
+    interval_for_duration,
 )
 
 # Load environment variables from .env file
@@ -227,10 +227,27 @@ def _build_hourly_response(site_id, device_id, port_id, duration):
     Raises ValueError on bad duration.
     """
     start, end, clipped, retention_notice = _compute_window(duration)
+    interval_param, interval_seconds = interval_for_duration(duration)
 
-    bw = mist.get_gateway_hourly_bandwidth(site_id, device_id, port_id, start, end)
-    wlh = mist.get_gateway_hourly_wan_link_health(site_id, device_id, port_id, start, end)
-    app_health = mist.get_site_application_health(site_id, start, end)
+    bw = mist.get_gateway_hourly_bandwidth(
+        site_id,
+        device_id,
+        port_id,
+        start,
+        end,
+        interval_param=interval_param,
+        interval_seconds=interval_seconds,
+    )
+    wlh = mist.get_gateway_hourly_wan_link_health(
+        site_id,
+        device_id,
+        port_id,
+        start,
+        end,
+        interval_param=interval_param,
+        interval_seconds=interval_seconds,
+    )
+    app_health = mist.get_site_application_health(site_id, start, end, interval_seconds=interval_seconds)
 
     # Merge bandwidth + wan_link_health by hour bucket
     wlh_by_ts = {s["timestamp"]: s for s in wlh.get("samples", [])}
@@ -295,7 +312,7 @@ def _build_hourly_response(site_id, device_id, port_id, duration):
         "site_name": site_name,
         "start": start,
         "end": end,
-        "interval": HOUR_INTERVAL,
+        "interval": interval_seconds,
         "clipped": clipped,
         "retention_notice": retention_notice,
         "hourly": hourly,
@@ -362,6 +379,7 @@ def export_gateway_port_hourly_csv(site_id, device_id, port_id):
         for r in rows:
 
             def cell(v):
+                """Render None as empty string so CSV cells stay blank instead of literal 'None'."""
                 return "" if v is None else v
 
             writer.writerow(

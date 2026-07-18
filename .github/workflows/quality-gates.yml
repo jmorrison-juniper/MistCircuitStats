@@ -116,6 +116,33 @@ jobs:
       - run: pip install vulture
       - run: vulture . --min-confidence 90 --exclude '.github,.specify,docs,specs,templates'
 
+  # ── DOCUMENTATION ─────────────────────────────────────────────
+  interrogate:
+    name: "Interrogate (docstring coverage ≥90%)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install interrogate
+      - run: interrogate -v .
+
+  pydoclint:
+    name: "Pydoclint (docstring quality)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install pydoclint
+      - run: pydoclint .
+
   # ── FAILURE → GITHUB ISSUES ───────────────────────────────────
   create_failure_issues:
     name: "Create issues for failures"
@@ -126,6 +153,8 @@ jobs:
       - pip_audit
       - radon
       - vulture
+      - interrogate
+      - pydoclint
     if: ${{ always() && github.ref == 'refs/heads/main' && contains(needs.*.result, 'failure') }}
     runs-on: ubuntu-latest
     permissions:
@@ -151,6 +180,8 @@ jobs:
           RESULTS[pip_audit]="${{ needs.pip_audit.result }}"
           RESULTS[radon]="${{ needs.radon.result }}"
           RESULTS[vulture]="${{ needs.vulture.result }}"
+          RESULTS[interrogate]="${{ needs.interrogate.result }}"
+          RESULTS[pydoclint]="${{ needs.pydoclint.result }}"
 
           for gate in "${!RESULTS[@]}"; do
             result="${RESULTS[$gate]}"
@@ -193,6 +224,8 @@ jobs:
       - pip_audit
       - radon
       - vulture
+      - interrogate
+      - pydoclint
     if: ${{ always() && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     permissions:
@@ -211,6 +244,8 @@ jobs:
           RESULTS[pip_audit]="${{ needs.pip_audit.result }}"
           RESULTS[radon]="${{ needs.radon.result }}"
           RESULTS[vulture]="${{ needs.vulture.result }}"
+          RESULTS[interrogate]="${{ needs.interrogate.result }}"
+          RESULTS[pydoclint]="${{ needs.pydoclint.result }}"
 
           for gate in "${!RESULTS[@]}"; do
             result="${RESULTS[$gate]}"

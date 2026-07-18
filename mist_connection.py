@@ -17,9 +17,16 @@ RETENTION_SECONDS = RETENTION_DAYS * 86400
 HOUR_INTERVAL = 3600
 
 _DURATION_MAP = {
+    "1h": 3600,
+    "6h": 6 * 3600,
     "24h": 24 * 3600,
     "3d": 3 * 86400,
     "7d": 7 * 86400,
+}
+
+# Sub-hourly for 1h view so the chart has enough buckets; hourly otherwise.
+_INTERVAL_MAP = {
+    "1h": ("10m", 600),
 }
 
 
@@ -28,6 +35,11 @@ def duration_to_seconds(duration: str) -> int:
     if duration not in _DURATION_MAP:
         raise ValueError(f"duration must be one of: {', '.join(_DURATION_MAP.keys())}")
     return _DURATION_MAP[duration]
+
+
+def interval_for_duration(duration: str) -> tuple[str, int]:
+    """Return (api_param, seconds) for the sample interval to use for a duration."""
+    return _INTERVAL_MAP.get(duration, ("1h", HOUR_INTERVAL))
 
 
 def clip_to_retention_window(start: int, end: int, retention_days: int = RETENTION_DAYS) -> tuple[int, bool, str]:
@@ -47,8 +59,14 @@ def clip_to_retention_window(start: int, end: int, retention_days: int = RETENTI
     return start, False, ""
 
 
-def hour_iso(ts: int) -> str:
-    """Render a UTC epoch second as YYYY-MM-DDTHH:00:00Z hour-bucket ISO."""
+def hour_iso(ts: int, interval_s: int = HOUR_INTERVAL) -> str:
+    """Render a UTC epoch second as a bucket-ISO string.
+
+    Uses hour precision (`YYYY-MM-DDTHH:00:00Z`) for hourly or coarser
+    intervals; falls back to minute precision when the interval is sub-hourly.
+    """
+    if interval_s and interval_s < HOUR_INTERVAL:
+        return datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%dT%H:%M:00Z")
     return datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%dT%H:00:00Z")
 
 
@@ -178,9 +196,12 @@ class MistConnection:
                 del MistConnection._rate_limited_tokens[self.api_token]
         return False
 
-    def _handle_rate_limit_response(self, response) -> bool:
+    def _handle_rate_limit_response(self, response: object) -> bool:
         """
         Check response for 429 rate limit and handle token rotation.
+
+        Args:
+            response: mistapi/requests response object whose status_code we inspect.
 
         Returns:
             True if rate limited (caller should handle), False if OK to proceed
@@ -435,11 +456,13 @@ class MistConnection:
 
     @staticmethod
     def _cidr_to_dotted_netmask(cidr_int: int) -> str:
+        """Convert an integer CIDR prefix length to dotted-quad netmask string."""
         mask = (0xFFFFFFFF >> (32 - cidr_int)) << (32 - cidr_int)
         return f"{(mask >> 24) & 0xff}.{(mask >> 16) & 0xff}.{(mask >> 8) & 0xff}.{mask & 0xff}"
 
     @staticmethod
     def _dotted_netmask_to_cidr(netmask_str: str) -> str:
+        """Convert a dotted-quad netmask string to CIDR prefix length (as string)."""
         if not netmask_str or "." not in netmask_str:
             return netmask_str
         parts = netmask_str.split(".")
@@ -447,6 +470,7 @@ class MistConnection:
         return str(binary.count("1"))
 
     def _fetch_gateway_device_list(self) -> list:
+        """Fetch all gateway device stats rows for the org (paginated, rate-limit aware)."""
         device_response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
             self.apisession, self.org_id, type="gateway", limit=1000
         )
@@ -459,6 +483,7 @@ class MistConnection:
         return mistapi.get_all(self.apisession, device_response)
 
     def _fetch_org_port_stats_by_gateway(self, gateway_macs: set) -> tuple[dict, dict]:
+        """Return (wan_ports_by_device, all_ports_by_device) keyed by gateway MAC."""
         wan_ports_by_device: dict = {}
         all_ports_by_device: dict = {}
         port_response = mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts(self.apisession, self.org_id, limit=1000)
@@ -478,6 +503,7 @@ class MistConnection:
         return wan_ports_by_device, all_ports_by_device
 
     def _fetch_device_config(self, gw_site_id: str, gw_id: str) -> dict:
+        """Fetch per-device site config (port_config, template refs); {} on 429/error."""
         if not (gw_site_id and gw_id) or self._is_rate_limited():
             return {}
         response = mistapi.api.v1.sites.devices.getSiteDevice(self.apisession, gw_site_id, gw_id)
@@ -490,6 +516,7 @@ class MistConnection:
         return {}
 
     def _build_merged_port_config(self, gw_id: str, deviceprofile_id: str | None, device_config: dict) -> dict:
+        """Merge template/profile port_config with device-level overrides (device wins)."""
         merged: dict = {}
         gatewaytemplate_id = None if deviceprofile_id else device_config.get("gatewaytemplate_id")
 
@@ -517,6 +544,7 @@ class MistConnection:
 
     @staticmethod
     def _extract_wan_port_configs(merged_port_config: dict) -> dict:
+        """Filter merged port_config down to WAN-usage entries with normalized fields."""
         wan_cfg: dict = {}
         for port_name, port_cfg in merged_port_config.items():
             if port_cfg.get("usage") != "wan":
@@ -537,6 +565,7 @@ class MistConnection:
         return wan_cfg
 
     def _fetch_runtime_ips(self, gw_site_id: str, gw_mac: str) -> dict:
+        """Fetch live DHCP-assigned IPs per WAN port_id from site device stats."""
         runtime: dict = {}
         if not gw_site_id or self._is_rate_limited():
             return runtime
@@ -569,6 +598,7 @@ class MistConnection:
 
     @staticmethod
     def _match_wan_config_for_port(port_id: str, port_desc: str, wan_cfg_by_name: dict) -> dict:
+        """Resolve a WAN config entry for a port by exact name, sub-interface prefix, or description."""
         cfg = wan_cfg_by_name.get(port_id, {})
         if cfg:
             return cfg
@@ -582,6 +612,7 @@ class MistConnection:
         return {}
 
     def _resolve_ip_and_netmask(self, port_config: dict, runtime_ip_data: dict) -> tuple[str, str]:
+        """Prefer runtime DHCP-assigned IP/netmask when the port is DHCP; else use configured values."""
         if runtime_ip_data and port_config.get("type") == "dhcp":
             return (
                 runtime_ip_data.get("ip", ""),
@@ -595,6 +626,7 @@ class MistConnection:
 
     @staticmethod
     def _build_wan_port_from_stats(port: dict, port_config: dict, ip_addr: str, netmask: str) -> dict:
+        """Compose the WAN port dict from live port-stats plus resolved config/IP fields."""
         return {
             "name": port.get("port_id"),
             "wan_name": port_config.get("name", ""),
@@ -622,6 +654,7 @@ class MistConnection:
     def _build_wan_port_from_config(
         base_port_name: str, cfg: dict, ip_addr: str, netmask: str, port_stats: dict
     ) -> dict:
+        """Compose the WAN port dict from config alone (no live per-port stats entry)."""
         physical_up = port_stats.get("up", False)
         return {
             "name": base_port_name,
@@ -647,6 +680,7 @@ class MistConnection:
         }
 
     def _build_ports_from_live_stats(self, wan_ports: list, wan_cfg_by_name: dict, runtime_ips_by_port: dict) -> list:
+        """Build WAN port dicts for every port that has live stats, applying config overlays."""
         default_cfg = {
             "name": "",
             "description": "",
@@ -676,6 +710,7 @@ class MistConnection:
         device_port_stats: dict,
         ports_with_stats: set,
     ) -> list:
+        """Build WAN port dicts from configuration for ports without any live stats row."""
         results = []
         for cfg_port_name, cfg in wan_cfg_by_name.items():
             if "{{" in cfg_port_name or "}}" in cfg_port_name:
@@ -690,6 +725,7 @@ class MistConnection:
 
     @staticmethod
     def _ports_with_stats_set(port_configs: list) -> set:
+        """Return set of port names (both full and base) already produced from live stats."""
         s: set = set()
         for pc in port_configs:
             name = pc.get("name", "")
@@ -706,6 +742,7 @@ class MistConnection:
         inventory_map: dict,
         site_map: dict,
     ) -> dict:
+        """Assemble a single gateway summary dict (site, ports, status) from cached lookups."""
         gw_site_id = gw.get("site_id")
         gw_id = gw.get("id")
         gw_mac = gw.get("mac")
@@ -942,11 +979,18 @@ class MistConnection:
     # ------------------------------------------------------------------
 
     def _insights_gateway_stats(
-        self, site_id: str, device_id: str, port_id: str, start: int, end: int, metrics: str
+        self,
+        site_id: str,
+        device_id: str,
+        port_id: str,
+        start: int,
+        end: int,
+        metrics: str,
+        interval_param: str = "1h",
     ) -> dict:
         """
         Shared helper: GET /api/v1/sites/{site_id}/insights/gateway/{device_id}/stats
-        with port_id filter and 1h interval. Returns
+        with port_id filter and configurable interval. Returns
             {'success': bool, 'rate_limited': bool, 'data': dict-or-None}
         Never raises for 429; funnels through _mark_token_rate_limited.
         """
@@ -960,7 +1004,7 @@ class MistConnection:
         params = {
             "metrics": metrics,
             "port_id": port_id,
-            "interval": "1h",
+            "interval": interval_param,
             "start": start,
             "end": end,
         }
@@ -988,11 +1032,79 @@ class MistConnection:
             logger.warning(f"insights/gateway stats error metrics={metrics} port={port_id}: {e}")
             return {"success": False, "rate_limited": False, "data": None}
 
-    def get_gateway_hourly_bandwidth(self, site_id: str, device_id: str, port_id: str, start: int, end: int) -> dict:
+    def _insights_device_wan_link_health(
+        self,
+        site_id: str,
+        device_id: str,
+        port_id: str,
+        start: int,
+        end: int,
+        interval_param: str = "1h",
+    ) -> dict:
         """
-        Return hourly Rx/Tx bandwidth for one WAN port.
+        GET /api/v1/sites/{site_id}/insights/device/{mac}/wan_link_health
+
+        wan_link_health has scope=device (not gateway) — metric goes in the URL path
+        and the identifier is the 12-char MAC (no separators), derived from device_id.
+        Returns {'success': bool, 'rate_limited': bool, 'data': dict|None}.
+        """
+        import requests
+
+        if self._is_rate_limited():
+            return {"success": False, "rate_limited": True, "data": None}
+
+        mac = device_id.replace("-", "")[-12:]
+        headers = {"Authorization": f"Token {self.api_token}", "Content-Type": "application/json"}
+        url = f"https://{self.host}/api/v1/sites/{site_id}/insights/device/{mac}/wan_link_health"
+        params = {"port_id": port_id, "interval": interval_param, "start": start, "end": end}
+
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=60)
+
+            if response.status_code == 429:
+                switched = self._mark_token_rate_limited()
+                if switched:
+                    headers["Authorization"] = f"Token {self.api_token}"
+                    response = requests.get(url, headers=headers, params=params, timeout=60)
+                    if response.status_code == 429:
+                        self._mark_token_rate_limited()
+
+                if response.status_code != 200:
+                    return {"success": False, "rate_limited": True, "data": None}
+
+            if response.status_code == 200:
+                return {"success": True, "rate_limited": False, "data": response.json()}
+
+            logger.warning(f"insights/device wan_link_health {response.status_code} mac={mac} port={port_id}")
+            return {"success": False, "rate_limited": False, "data": None}
+        except Exception as e:
+            logger.warning(f"insights/device wan_link_health error mac={mac} port={port_id}: {e}")
+            return {"success": False, "rate_limited": False, "data": None}
+
+    def get_gateway_hourly_bandwidth(
+        self,
+        site_id: str,
+        device_id: str,
+        port_id: str,
+        start: int,
+        end: int,
+        interval_param: str = "1h",
+        interval_seconds: int = HOUR_INTERVAL,
+    ) -> dict:
+        """
+        Return per-bucket Rx/Tx bandwidth for one WAN port.
 
         Wraps GET /insights/gateway/{device_id}/stats?metrics=tx_bps,rx_bps,max_tx_bps,max_rx_bps
+
+        Args:
+            site_id: Mist site UUID.
+            device_id: Gateway device UUID.
+            port_id: WAN port identifier (e.g. "ge-0/0/0").
+            start: Epoch seconds, inclusive.
+            end: Epoch seconds, exclusive.
+            interval_param: Interval string sent to the Insights API (e.g. "1h", "10m").
+            interval_seconds: Fallback bucket size in seconds when the API omits `interval` in the response.
+
         Returns:
             {
               'success': bool,
@@ -1006,15 +1118,19 @@ class MistConnection:
             }
         """
         result = self._insights_gateway_stats(
-            site_id, device_id, port_id, start, end, metrics="tx_bps,rx_bps,max_tx_bps,max_rx_bps"
+            site_id,
+            device_id,
+            port_id,
+            start,
+            end,
+            metrics="tx_bps,rx_bps,max_tx_bps,max_rx_bps",
+            interval_param=interval_param,
         )
         if not result["success"]:
             return {"success": False, "rate_limited": result["rate_limited"], "samples": []}
 
         data = result["data"] or {}
-        # Mist insights stats return per-metric arrays aligned by index; also
-        # commonly exposes 'start' and 'interval' at the envelope level.
-        interval = data.get("interval", HOUR_INTERVAL) or HOUR_INTERVAL
+        interval = data.get("interval", interval_seconds) or interval_seconds
         env_start = data.get("start", start)
         tx = data.get("tx_bps", []) or []
         rx = data.get("rx_bps", []) or []
@@ -1028,7 +1144,7 @@ class MistConnection:
             samples.append(
                 {
                     "timestamp": ts,
-                    "hour_iso": hour_iso(ts),
+                    "hour_iso": hour_iso(ts, interval),
                     "tx_bps": tx[i] if i < len(tx) else None,
                     "rx_bps": rx[i] if i < len(rx) else None,
                     "max_tx_bps": max_tx[i] if i < len(max_tx) else None,
@@ -1039,27 +1155,47 @@ class MistConnection:
         return {"success": True, "rate_limited": False, "samples": samples}
 
     @staticmethod
-    def _parse_wan_link_health_arrays(data: dict) -> tuple[list, list, list]:
-        """Normalize wan_link_health payload shapes to (latency, jitter, loss) arrays."""
+    def _wlh_from_list(wlh: list) -> tuple[list, list, list]:
+        """Extract per-index (latency, jitter, loss) arrays from a list-shaped wan_link_health payload."""
+        latency_arr, jitter_arr, loss_arr = [], [], []
+        for entry in wlh:
+            if isinstance(entry, dict):
+                latency_arr.append(entry.get("latency") or entry.get("avg_latency"))
+                jitter_arr.append(entry.get("jitter") or entry.get("avg_jitter"))
+                loss_arr.append(entry.get("loss") or entry.get("avg_loss"))
+            else:
+                latency_arr.append(None)
+                jitter_arr.append(None)
+                loss_arr.append(None)
+        return latency_arr, jitter_arr, loss_arr
+
+    @staticmethod
+    def _wlh_from_dict(wlh: dict) -> tuple[list, list, list]:
+        """Extract (latency, jitter, loss) arrays from a dict-shaped wan_link_health payload."""
+        return (
+            wlh.get("latency", wlh.get("avg_latency", [])) or [],
+            wlh.get("jitter", wlh.get("avg_jitter", [])) or [],
+            wlh.get("loss", wlh.get("avg_loss", [])) or [],
+        )
+
+    @classmethod
+    def _parse_wan_link_health_arrays(cls, data: dict) -> tuple[list, list, list]:
+        """Normalize wan_link_health payload shapes to (latency, jitter, loss) arrays.
+
+        The device-scoped endpoint returns top-level keys `avg_latency`, `avg_jitter`,
+        `avg_loss` (each an array). Older gateway-scoped shapes are also tolerated.
+        """
+        if any(k in data for k in ("avg_latency", "avg_jitter", "avg_loss")):
+            return (
+                data.get("avg_latency", []) or [],
+                data.get("avg_jitter", []) or [],
+                data.get("avg_loss", []) or [],
+            )
         wlh = data.get("wan_link_health")
         if isinstance(wlh, list):
-            latency_arr, jitter_arr, loss_arr = [], [], []
-            for entry in wlh:
-                if isinstance(entry, dict):
-                    latency_arr.append(entry.get("latency"))
-                    jitter_arr.append(entry.get("jitter"))
-                    loss_arr.append(entry.get("loss"))
-                else:
-                    latency_arr.append(None)
-                    jitter_arr.append(None)
-                    loss_arr.append(None)
-            return latency_arr, jitter_arr, loss_arr
+            return cls._wlh_from_list(wlh)
         if isinstance(wlh, dict):
-            return (
-                wlh.get("latency", []) or [],
-                wlh.get("jitter", []) or [],
-                wlh.get("loss", []) or [],
-            )
+            return cls._wlh_from_dict(wlh)
         return (
             data.get("latency", []) or [],
             data.get("jitter", []) or [],
@@ -1067,11 +1203,27 @@ class MistConnection:
         )
 
     def get_gateway_hourly_wan_link_health(
-        self, site_id: str, device_id: str, port_id: str, start: int, end: int
+        self,
+        site_id: str,
+        device_id: str,
+        port_id: str,
+        start: int,
+        end: int,
+        interval_param: str = "1h",
+        interval_seconds: int = HOUR_INTERVAL,
     ) -> dict:
         """
-        Return hourly jitter/latency/loss for one WAN port via the native
-        wan_link_health insight metric. No fanout, no rollup, no peer_count.
+        Return per-bucket jitter/latency/loss for one WAN port via the native
+        wan_link_health insight metric (device-scoped endpoint).
+
+        Args:
+            site_id: Mist site UUID.
+            device_id: Gateway device UUID.
+            port_id: WAN port identifier (e.g. "ge-0/0/0").
+            start: Epoch seconds, inclusive.
+            end: Epoch seconds, exclusive.
+            interval_param: Interval string sent to the Insights API (e.g. "1h", "10m").
+            interval_seconds: Fallback bucket size in seconds when the API omits `interval` in the response.
 
         Returns:
             {
@@ -1086,12 +1238,14 @@ class MistConnection:
               ]
             }
         """
-        result = self._insights_gateway_stats(site_id, device_id, port_id, start, end, metrics="wan_link_health")
+        result = self._insights_device_wan_link_health(
+            site_id, device_id, port_id, start, end, interval_param=interval_param
+        )
         if not result["success"]:
             return {"success": False, "rate_limited": result["rate_limited"], "samples": []}
 
         data = result["data"] or {}
-        interval = data.get("interval", HOUR_INTERVAL) or HOUR_INTERVAL
+        interval = data.get("interval", interval_seconds) or interval_seconds
         env_start = data.get("start", start)
 
         latency_arr, jitter_arr, loss_arr = self._parse_wan_link_health_arrays(data)
@@ -1103,7 +1257,7 @@ class MistConnection:
             samples.append(
                 {
                     "timestamp": ts,
-                    "hour_iso": hour_iso(ts),
+                    "hour_iso": hour_iso(ts, interval),
                     "avg_latency_ms": latency_arr[i] if i < len(latency_arr) else None,
                     "avg_jitter_ms": jitter_arr[i] if i < len(jitter_arr) else None,
                     "avg_loss_pct": loss_arr[i] if i < len(loss_arr) else None,
@@ -1154,39 +1308,73 @@ class MistConnection:
 
     @staticmethod
     def _pct_from_good_total(good, total) -> float | None:
+        """Return good/total as a percentage rounded to 2 decimals, or None if total is falsy."""
         tot = total or 0
         g = good or 0
         return round(100.0 * g / tot, 2) if tot else None
 
-    def _parse_app_health_summary(self, site_id: str) -> tuple[float | None, bool]:
-        s = self._sle_app_health_get(site_id, "summary")
-        if not (s["success"] and isinstance(s["data"], dict)):
-            return None, s["rate_limited"]
-        summary_pct = s["data"].get("sle")
-        if summary_pct is None:
-            summary_pct = self._pct_from_good_total(s["data"].get("good"), s["data"].get("total"))
-        return summary_pct, s["rate_limited"]
+    def _fetch_app_health_summary_trend(
+        self, site_id: str, start: int, end: int, interval_seconds: int = HOUR_INTERVAL
+    ) -> dict:
+        """
+        Single fetch of /summary-trend that both summary_pct and trend derive from.
+        The /summary endpoint returns 400 "unknown" for application-health, but
+        /summary-trend returns 200 with sle.samples.{total,degraded,value} arrays.
+        """
+        return self._sle_app_health_get(
+            site_id,
+            "summary-trend",
+            params={"interval": interval_seconds, "start": start, "end": end},
+        )
 
-    def _parse_app_health_trend(self, site_id: str, start: int, end: int) -> tuple[list, bool]:
-        st = self._sle_app_health_get(site_id, "summary-trend", params={"interval": 3600, "start": start, "end": end})
-        if not (st["success"] and isinstance(st["data"], dict)):
-            return [], st["rate_limited"]
-        samples = st["data"].get("results") or st["data"].get("trend") or []
-        env_start = st["data"].get("start", start)
-        interval = st["data"].get("interval", HOUR_INTERVAL) or HOUR_INTERVAL
+    @staticmethod
+    def _extract_sle_samples(data: dict) -> tuple[list, list, list, int, int]:
+        """Return (totals, degradeds, values, env_start, interval) from a summary-trend payload."""
+        sle = data.get("sle") if isinstance(data, dict) else None
+        samples = sle.get("samples", {}) if isinstance(sle, dict) else {}
+        totals = samples.get("total", []) or []
+        degradeds = samples.get("degraded", []) or []
+        values = samples.get("value", []) or []
+        env_start = int(data.get("start") or sle.get("start") if isinstance(sle, dict) else 0) or int(
+            data.get("start", 0)
+        )
+        interval = int(data.get("interval") or HOUR_INTERVAL)
+        return totals, degradeds, values, env_start, interval
+
+    def _parse_app_health_summary_from_trend(self, trend_result: dict) -> tuple[float | None, bool]:
+        """Derive summary_pct = 100 * (sum(total) - sum(degraded)) / sum(total)."""
+        if not (trend_result["success"] and isinstance(trend_result["data"], dict)):
+            return None, trend_result["rate_limited"]
+        totals, degradeds, _values, _es, _iv = self._extract_sle_samples(trend_result["data"])
+        tot = sum(t or 0 for t in totals)
+        if not tot:
+            return None, trend_result["rate_limited"]
+        deg = sum(d or 0 for d in degradeds)
+        return round(100.0 * (tot - deg) / tot, 2), trend_result["rate_limited"]
+
+    def _parse_app_health_trend_from_trend(self, trend_result: dict, start: int) -> tuple[list, bool]:
+        """Build per-bucket [{timestamp, pct}] from a summary-trend payload."""
+        if not (trend_result["success"] and isinstance(trend_result["data"], dict)):
+            return [], trend_result["rate_limited"]
+        totals, degradeds, values, env_start, interval = self._extract_sle_samples(trend_result["data"])
+        env_start = env_start or start
+        n = max(len(totals), len(degradeds), len(values))
         trend = []
-        for i, entry in enumerate(samples):
-            if isinstance(entry, dict):
-                ts = int(entry.get("time") or entry.get("timestamp") or (env_start + i * interval))
-                pct = entry.get("sle")
-                if pct is None:
-                    pct = self._pct_from_good_total(entry.get("good"), entry.get("total"))
-                trend.append({"timestamp": ts, "pct": pct})
+        for i in range(n):
+            ts = int(env_start + i * interval)
+            total = totals[i] if i < len(totals) else 0
+            degraded = degradeds[i] if i < len(degradeds) else 0
+            if total:
+                pct = round(100.0 * (total - degraded) / total, 2)
+            elif i < len(values) and values[i] is not None:
+                pct = values[i]
             else:
-                trend.append({"timestamp": int(env_start + i * interval), "pct": entry})
-        return trend, st["rate_limited"]
+                pct = None
+            trend.append({"timestamp": ts, "pct": pct})
+        return trend, trend_result["rate_limited"]
 
     def _parse_app_health_impacted(self, site_id: str, start: int, end: int) -> tuple[list, bool]:
+        """Fetch and normalize the impacted-interfaces list from the App Health SLE."""
         ii = self._sle_app_health_get(site_id, "impacted-interfaces", params={"start": start, "end": end})
         if not ii["success"]:
             return [], ii["rate_limited"]
@@ -1207,15 +1395,23 @@ class MistConnection:
         return impacted, ii["rate_limited"]
 
     def _parse_app_health_threshold(self, site_id: str) -> tuple[float | None, bool]:
+        """Fetch the App Health SLE threshold value (site-configured degraded cutoff)."""
         th = self._sle_app_health_get(site_id, "threshold")
         if not (th["success"] and isinstance(th["data"], dict)):
             return None, th["rate_limited"]
         return th["data"].get("threshold") or th["data"].get("sle"), th["rate_limited"]
 
-    def get_site_application_health(self, site_id: str, start: int, end: int) -> dict:
-        """Fetch native Mist Application Health SLE (summary/trend/impacted/threshold)."""
-        summary_pct, rl1 = self._parse_app_health_summary(site_id)
-        trend, rl2 = self._parse_app_health_trend(site_id, start, end)
+    def get_site_application_health(
+        self, site_id: str, start: int, end: int, interval_seconds: int = HOUR_INTERVAL
+    ) -> dict:
+        """Fetch native Mist Application Health SLE (summary/trend/impacted/threshold).
+
+        summary_pct and trend both derive from a single /summary-trend call
+        because the /summary endpoint returns HTTP 400 for application-health.
+        """
+        trend_result = self._fetch_app_health_summary_trend(site_id, start, end, interval_seconds)
+        summary_pct, rl1 = self._parse_app_health_summary_from_trend(trend_result)
+        trend, rl2 = self._parse_app_health_trend_from_trend(trend_result, start)
         impacted_interfaces, rl3 = self._parse_app_health_impacted(site_id, start, end)
         threshold_pct, rl4 = self._parse_app_health_threshold(site_id)
 
