@@ -542,6 +542,8 @@
                 </div>
                 <div class="d-flex align-items-center">
                     <div class="btn-group me-2" role="group" aria-label="WAN insights timeframe">
+                        <button type="button" class="btn btn-sm btn-outline-light" onclick="filterWanInsights('1h')" id="wi-btn-1h">1h</button>
+                        <button type="button" class="btn btn-sm btn-outline-light" onclick="filterWanInsights('6h')" id="wi-btn-6h">6h</button>
                         <button type="button" class="btn btn-sm btn-outline-light active" onclick="filterWanInsights('24h')" id="wi-btn-24h">24h</button>
                         <button type="button" class="btn btn-sm btn-outline-light" onclick="filterWanInsights('3d')" id="wi-btn-3d">3d</button>
                         <button type="button" class="btn btn-sm btn-outline-light" onclick="filterWanInsights('7d')" id="wi-btn-7d">7d</button>
@@ -1191,7 +1193,7 @@
         // ---- WAN Insights (hourly, native) ----
 
         function updateWanInsightsButtons() {
-            ['24h', '3d', '7d'].forEach(dur => {
+            ['1h', '6h', '24h', '3d', '7d'].forEach(dur => {
                 const btn = document.getElementById(`wi-btn-${dur}`);
                 if (btn) btn.classList.toggle('active', dur === currentWanInsightsDuration);
             });

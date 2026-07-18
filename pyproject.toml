@@ -22,3 +22,30 @@ extend-exclude = "\\.specify|docs|specs|templates"
 
 [tool.bandit]
 exclude_dirs = [".github", ".specify", "docs", "specs", "templates"]
+
+[tool.interrogate]
+fail-under = 90
+exclude = [".github", ".specify", "docs", "specs", "templates"]
+ignore-init-method = false
+ignore-init-module = false
+ignore-magic = false
+ignore-module = false
+ignore-private = false
+ignore-nested-classes = false
+ignore-nested-functions = false
+ignore-property-decorators = false
+ignore-semiprivate = false
+ignore-setters = false
+verbose = 2
+
+[tool.pydoclint]
+style = "google"
+exclude = '\.github|\.specify|docs|specs|templates'
+arg-type-hints-in-docstring = false
+arg-type-hints-in-signature = true
+check-return-types = false
+check-yield-types = false
+skip-checking-raises = true
+check-arg-order = false
+skip-checking-short-docstrings = true
+allow-init-docstring = true
