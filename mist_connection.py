@@ -2,10 +2,11 @@
 Mist API Connection Wrapper
 Handles all interactions with the Juniper Mist API using mistapi SDK
 """
+
 import logging
 import time
-from datetime import datetime, timezone
-from typing import List, Dict, Optional, Tuple
+from datetime import UTC, datetime
+
 import mistapi
 
 logger = logging.getLogger(__name__)
@@ -16,9 +17,9 @@ RETENTION_SECONDS = RETENTION_DAYS * 86400
 HOUR_INTERVAL = 3600
 
 _DURATION_MAP = {
-    '24h': 24 * 3600,
-    '3d': 3 * 86400,
-    '7d': 7 * 86400,
+    "24h": 24 * 3600,
+    "3d": 3 * 86400,
+    "7d": 7 * 86400,
 }
 
 
@@ -29,15 +30,15 @@ def duration_to_seconds(duration: str) -> int:
     return _DURATION_MAP[duration]
 
 
-def clip_to_retention_window(start: int, end: int, retention_days: int = RETENTION_DAYS) -> Tuple[int, bool, str]:
+def clip_to_retention_window(start: int, end: int, retention_days: int = RETENTION_DAYS) -> tuple[int, bool, str]:
     """Clip requested start to (end - retention). Returns (clamped_start, clipped_flag, notice)."""
     retention = retention_days * 86400
     earliest = end - retention
     if start < earliest:
         clamped_start = earliest
         clipped = True
-        start_iso = datetime.fromtimestamp(clamped_start, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-        end_iso = datetime.fromtimestamp(end, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        start_iso = datetime.fromtimestamp(clamped_start, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_iso = datetime.fromtimestamp(end, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         notice = (
             f"Data range clipped to the API's {retention_days}-day 1h-interval retention window "
             f"(from {start_iso} to {end_iso})."
@@ -48,34 +49,34 @@ def clip_to_retention_window(start: int, end: int, retention_days: int = RETENTI
 
 def hour_iso(ts: int) -> str:
     """Render a UTC epoch second as YYYY-MM-DDTHH:00:00Z hour-bucket ISO."""
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%dT%H:00:00Z')
+    return datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%dT%H:00:00Z")
 
 
 class MistConnection:
     """Wrapper class for Mist API operations"""
-    
+
     # Class-level caches to reduce API calls across requests
-    _sites_cache: Optional[List[Dict]] = None
+    _sites_cache: list[dict] | None = None
     _sites_cache_time: float = 0
-    _device_profile_cache: Dict[str, Dict] = {}
-    _gateway_template_cache: Dict[str, Dict] = {}
-    
+    _device_profile_cache: dict[str, dict] = {}
+    _gateway_template_cache: dict[str, dict] = {}
+
     # Rate limiting tracking (per-token)
-    _rate_limited_tokens: Dict[str, float] = {}  # token -> reset time
+    _rate_limited_tokens: dict[str, float] = {}  # token -> reset time
     RATE_LIMIT_BACKOFF = 60  # seconds to wait before retrying after 429
-    
+
     # Token rotation tracking
-    _all_tokens: List[str] = []
+    _all_tokens: list[str] = []
     _current_token_index: int = 0
-    
+
     # Cache TTLs (in seconds)
     SITES_CACHE_TTL = 300  # 5 minutes
     PROFILE_CACHE_TTL = 600  # 10 minutes
-    
-    def __init__(self, api_token: str, org_id: Optional[str] = None, host: str = 'api.mist.com'):
+
+    def __init__(self, api_token: str, org_id: str | None = None, host: str = "api.mist.com"):
         """
         Initialize Mist API connection with support for multiple tokens
-        
+
         Args:
             api_token: Mist API token(s) - can be comma-separated for multiple tokens
             org_id: Organization ID (optional, will auto-detect if not provided)
@@ -83,26 +84,26 @@ class MistConnection:
         """
         if not api_token:
             raise ValueError("MIST_APITOKEN environment variable is required")
-        
+
         # Parse multiple tokens (comma-separated)
-        MistConnection._all_tokens = [t.strip() for t in api_token.split(',') if t.strip()]
+        MistConnection._all_tokens = [t.strip() for t in api_token.split(",") if t.strip()]
         if not MistConnection._all_tokens:
             raise ValueError("No valid API tokens provided")
-        
+
         logger.info(f"Initialized with {len(MistConnection._all_tokens)} API token(s)")
-        
+
         self.host = host
         self.org_id = org_id
-        
+
         # Initialize with the first available (non-rate-limited) token
         self._init_api_session()
-        
+
         # Auto-detect org_id if not provided
         if not self.org_id:
             self._auto_detect_org()
-        
+
         logger.info(f"Initialized Mist connection to {self.host} for org {self.org_id}")
-    
+
     def _init_api_session(self):
         """Initialize or reinitialize the API session with the current token"""
         self.api_token = self._get_available_token()
@@ -110,20 +111,21 @@ class MistConnection:
             host=self.host,
             apitoken=self.api_token,
             console_log_level=30,  # WARNING - reduce console noise
-            logging_log_level=20   # INFO - reasonable file logging
+            logging_log_level=20,  # INFO - reasonable file logging
         )
-    
+
     def _get_available_token(self) -> str:
         """Get the next available (non-rate-limited) token"""
         current_time = time.time()
-        
+
         # Clean up expired rate limits
-        expired_tokens = [t for t, reset_time in MistConnection._rate_limited_tokens.items() 
-                         if current_time >= reset_time]
+        expired_tokens = [
+            t for t, reset_time in MistConnection._rate_limited_tokens.items() if current_time >= reset_time
+        ]
         for token in expired_tokens:
             del MistConnection._rate_limited_tokens[token]
-            logger.info(f"Token rate limit expired, token available again")
-        
+            logger.info("Token rate limit expired, token available again")
+
         # Try to find a non-rate-limited token
         for i in range(len(MistConnection._all_tokens)):
             idx = (MistConnection._current_token_index + i) % len(MistConnection._all_tokens)
@@ -131,26 +133,26 @@ class MistConnection:
             if token not in MistConnection._rate_limited_tokens:
                 MistConnection._current_token_index = idx
                 return token
-        
+
         # All tokens are rate limited, return the one with the soonest reset
         if MistConnection._rate_limited_tokens:
             soonest_token = min(MistConnection._rate_limited_tokens.items(), key=lambda x: x[1])[0]
             wait_time = MistConnection._rate_limited_tokens[soonest_token] - current_time
             logger.warning(f"All tokens rate limited. Soonest available in {int(wait_time)}s")
             return soonest_token
-        
+
         # Fallback to current token
         return MistConnection._all_tokens[MistConnection._current_token_index]
-    
+
     def _mark_token_rate_limited(self, token: str = None):
         """Mark the current token as rate limited and try to switch to another"""
         token = token or self.api_token
         reset_time = time.time() + MistConnection.RATE_LIMIT_BACKOFF
         MistConnection._rate_limited_tokens[token] = reset_time
-        
-        token_num = MistConnection._all_tokens.index(token) + 1 if token in MistConnection._all_tokens else '?'
+
+        token_num = MistConnection._all_tokens.index(token) + 1 if token in MistConnection._all_tokens else "?"
         logger.warning(f"Token {token_num}/{len(MistConnection._all_tokens)} rate limited until {int(reset_time)}")
-        
+
         # Try to switch to another token
         if len(MistConnection._all_tokens) > 1:
             old_token = self.api_token
@@ -160,14 +162,11 @@ class MistConnection:
                 logger.info(f"Switching to token {new_token_num}/{len(MistConnection._all_tokens)}")
                 self.api_token = new_token
                 self.apisession = mistapi.APISession(
-                    host=self.host,
-                    apitoken=self.api_token,
-                    console_log_level=30,
-                    logging_log_level=20
+                    host=self.host, apitoken=self.api_token, console_log_level=30, logging_log_level=20
                 )
                 return True  # Successfully switched
         return False  # No other token available
-    
+
     def _is_rate_limited(self) -> bool:
         """Check if current token is rate limited"""
         current_time = time.time()
@@ -178,11 +177,11 @@ class MistConnection:
                 # Rate limit expired
                 del MistConnection._rate_limited_tokens[self.api_token]
         return False
-    
+
     def _handle_rate_limit_response(self, response) -> bool:
         """
         Check response for 429 rate limit and handle token rotation.
-        
+
         Returns:
             True if rate limited (caller should handle), False if OK to proceed
         """
@@ -194,7 +193,7 @@ class MistConnection:
                 logger.warning("All tokens rate limited")
             return True
         return False
-    
+
     def _auto_detect_org(self):
         """Auto-detect organization ID from user privileges"""
         try:
@@ -205,8 +204,8 @@ class MistConnection:
             if response.status_code == 200:
                 data = response.data
                 # Get first org from privileges
-                if 'privileges' in data and len(data['privileges']) > 0:
-                    self.org_id = data['privileges'][0].get('org_id')
+                if "privileges" in data and len(data["privileges"]) > 0:
+                    self.org_id = data["privileges"][0].get("org_id")
                     logger.info(f"Auto-detected org_id: {self.org_id}")
                 else:
                     raise ValueError("No organizations found in user privileges")
@@ -215,8 +214,8 @@ class MistConnection:
         except Exception as e:
             logger.error(f"Error auto-detecting org_id: {str(e)}")
             raise
-    
-    def get_organization_info(self) -> Dict:
+
+    def get_organization_info(self) -> dict:
         """Get current organization information"""
         try:
             if not self.org_id:
@@ -227,18 +226,18 @@ class MistConnection:
             if response.status_code == 200:
                 data = response.data
                 return {
-                    'org_id': data.get('id'),
-                    'org_name': data.get('name', 'Unknown Organization'),
-                    'created_time': data.get('created_time', 0),
-                    'updated_time': data.get('updated_time', 0)
+                    "org_id": data.get("id"),
+                    "org_name": data.get("name", "Unknown Organization"),
+                    "created_time": data.get("created_time", 0),
+                    "updated_time": data.get("updated_time", 0),
                 }
             else:
                 raise Exception(f"API error: {response.status_code}")
         except Exception as e:
             logger.error(f"Error getting organization info: {str(e)}")
             raise
-    
-    def get_organizations(self) -> List[Dict]:
+
+    def get_organizations(self) -> list[dict]:
         """Get list of organizations the user has access to"""
         try:
             response = mistapi.api.v1.self.self.getSelf(self.apisession)
@@ -247,62 +246,61 @@ class MistConnection:
             if response.status_code == 200:
                 data = response.data
                 orgs = []
-                if 'privileges' in data:
-                    for priv in data['privileges']:
-                        if 'org_id' in priv and 'org_name' in priv:
-                            orgs.append({
-                                'org_id': priv['org_id'],
-                                'org_name': priv['org_name'],
-                                'role': priv.get('role', 'unknown')
-                            })
+                if "privileges" in data:
+                    for priv in data["privileges"]:
+                        if "org_id" in priv and "org_name" in priv:
+                            orgs.append(
+                                {
+                                    "org_id": priv["org_id"],
+                                    "org_name": priv["org_name"],
+                                    "role": priv.get("role", "unknown"),
+                                }
+                            )
                 return orgs
             else:
                 raise Exception(f"API error: {response.status_code}")
         except Exception as e:
             logger.error(f"Error getting organizations: {str(e)}")
             raise
-    
-    def get_sites(self) -> List[Dict]:
+
+    def get_sites(self) -> list[dict]:
         """Get list of sites in the organization (cached with pagination)"""
         try:
             if not self.org_id:
                 raise ValueError("Organization ID is required")
-            
+
             # Check class-level cache
             current_time = time.time()
-            if (MistConnection._sites_cache is not None and 
-                current_time - MistConnection._sites_cache_time < self.SITES_CACHE_TTL):
+            if (
+                MistConnection._sites_cache is not None
+                and current_time - MistConnection._sites_cache_time < self.SITES_CACHE_TTL
+            ):
                 logger.debug("Using cached sites data")
                 return MistConnection._sites_cache
-            
+
             # Fetch all sites with automatic pagination
-            response = mistapi.api.v1.orgs.sites.listOrgSites(
-                self.apisession,
-                self.org_id,
-                limit=1000
-            )
+            response = mistapi.api.v1.orgs.sites.listOrgSites(self.apisession, self.org_id, limit=1000)
             if self._handle_rate_limit_response(response):
-                response = mistapi.api.v1.orgs.sites.listOrgSites(
-                    self.apisession,
-                    self.org_id,
-                    limit=1000
-                )
+                response = mistapi.api.v1.orgs.sites.listOrgSites(self.apisession, self.org_id, limit=1000)
             if response.status_code == 200:
                 # Use get_all to handle pagination automatically
                 sites = mistapi.get_all(self.apisession, response)
-                result = [{
-                    'id': site.get('id'),
-                    'name': site.get('name'),
-                    'address': site.get('address', ''),
-                    'timezone': site.get('timezone', 'UTC'),
-                    'num_devices': site.get('num_devices', 0)
-                } for site in sites]
-                
+                result = [
+                    {
+                        "id": site.get("id"),
+                        "name": site.get("name"),
+                        "address": site.get("address", ""),
+                        "timezone": site.get("timezone", "UTC"),
+                        "num_devices": site.get("num_devices", 0),
+                    }
+                    for site in sites
+                ]
+
                 # Update cache
                 MistConnection._sites_cache = result
                 MistConnection._sites_cache_time = current_time
                 logger.debug(f"Cached {len(result)} sites")
-                
+
                 return result
             else:
                 raise Exception(f"API error: {response.status_code}")
@@ -310,69 +308,63 @@ class MistConnection:
             logger.error(f"Error getting sites: {str(e)}")
             raise
 
-    def _batch_fetch_inventory(self, gateway_macs: set) -> Dict[str, Dict]:
+    def _batch_fetch_inventory(self, gateway_macs: set) -> dict[str, dict]:
         """
         Batch fetch device inventory data (device profile IDs, site IDs) using org-level inventory.
         This provides profile/template IDs without per-device API calls.
-        
+
         Args:
             gateway_macs: Set of gateway MAC addresses
-            
+
         Returns:
             Dictionary keyed by MAC with inventory data (deviceprofile_id, site_id, etc.)
         """
         inventory_data = {}
-        
+
         try:
             # Use org-level inventory to get device profile IDs for all gateways (with pagination)
             response = mistapi.api.v1.orgs.inventory.getOrgInventory(
-                self.apisession,
-                self.org_id,
-                type='gateway',
-                limit=1000
+                self.apisession, self.org_id, type="gateway", limit=1000
             )
-            
+
             if self._handle_rate_limit_response(response):
                 response = mistapi.api.v1.orgs.inventory.getOrgInventory(
-                    self.apisession,
-                    self.org_id,
-                    type='gateway',
-                    limit=1000
+                    self.apisession, self.org_id, type="gateway", limit=1000
                 )
-            
+
             if response.status_code == 200:
                 # Use get_all to handle pagination automatically
                 results = mistapi.get_all(self.apisession, response)
-                
+
                 for device in results:
-                    mac = device.get('mac', '')
+                    mac = device.get("mac", "")
                     if mac not in gateway_macs:
                         continue
-                    
+
                     # Extract inventory data
                     inventory_data[mac] = {
-                        'device_id': device.get('id'),
-                        'site_id': device.get('site_id'),
-                        'deviceprofile_id': device.get('deviceprofile_id'),
-                        'name': device.get('name', '')
+                        "device_id": device.get("id"),
+                        "site_id": device.get("site_id"),
+                        "deviceprofile_id": device.get("deviceprofile_id"),
+                        "name": device.get("name", ""),
                     }
-                
+
                 logger.debug(f"Batch fetched inventory for {len(inventory_data)} gateways")
             else:
                 logger.warning(f"Org inventory returned {response.status_code}")
-                
+
         except Exception as e:
             logger.warning(f"Error in batch inventory fetch: {str(e)}")
-        
+
         return inventory_data
 
-    def _get_device_profile(self, deviceprofile_id: str) -> Dict:
+    def _get_device_profile(self, deviceprofile_id: str) -> dict:
         """
         Get device profile configuration (for Hub devices), using class-level cache
-        
+
         Args:
             deviceprofile_id: Device profile ID
-            
+
         Returns:
             Device profile data dictionary
         """
@@ -380,38 +372,36 @@ class MistConnection:
         if cache_key in MistConnection._device_profile_cache:
             logger.debug(f"Using cached device profile {deviceprofile_id}")
             return MistConnection._device_profile_cache[cache_key]
-        
+
         try:
             response = mistapi.api.v1.orgs.deviceprofiles.getOrgDeviceProfile(
-                self.apisession,
-                self.org_id,
-                deviceprofile_id
+                self.apisession, self.org_id, deviceprofile_id
             )
             if self._handle_rate_limit_response(response):
                 response = mistapi.api.v1.orgs.deviceprofiles.getOrgDeviceProfile(
-                    self.apisession,
-                    self.org_id,
-                    deviceprofile_id
+                    self.apisession, self.org_id, deviceprofile_id
                 )
             if response.status_code == 200:
                 MistConnection._device_profile_cache[cache_key] = response.data
-                logger.debug(f"Fetched and cached device profile {deviceprofile_id}: {response.data.get('name', 'unknown')}")
+                logger.debug(
+                    f"Fetched and cached device profile {deviceprofile_id}: " f"{response.data.get('name', 'unknown')}"
+                )
                 return response.data
             else:
                 logger.warning(f"Could not fetch device profile {deviceprofile_id}: {response.status_code}")
         except Exception as e:
             logger.warning(f"Error fetching device profile {deviceprofile_id}: {str(e)}")
-        
+
         MistConnection._device_profile_cache[cache_key] = {}
         return {}
 
-    def _get_gateway_template(self, gatewaytemplate_id: str) -> Dict:
+    def _get_gateway_template(self, gatewaytemplate_id: str) -> dict:
         """
         Get gateway template configuration (for Spoke/Branch devices), using class-level cache
-        
+
         Args:
             gatewaytemplate_id: Gateway template ID
-            
+
         Returns:
             Gateway template data dictionary
         """
@@ -419,649 +409,541 @@ class MistConnection:
         if cache_key in MistConnection._gateway_template_cache:
             logger.debug(f"Using cached gateway template {gatewaytemplate_id}")
             return MistConnection._gateway_template_cache[cache_key]
-        
+
         try:
             response = mistapi.api.v1.orgs.gatewaytemplates.getOrgGatewayTemplate(
-                self.apisession,
-                self.org_id,
-                gatewaytemplate_id
+                self.apisession, self.org_id, gatewaytemplate_id
             )
             if self._handle_rate_limit_response(response):
                 response = mistapi.api.v1.orgs.gatewaytemplates.getOrgGatewayTemplate(
-                    self.apisession,
-                    self.org_id,
-                    gatewaytemplate_id
+                    self.apisession, self.org_id, gatewaytemplate_id
                 )
             if response.status_code == 200:
                 MistConnection._gateway_template_cache[cache_key] = response.data
-                logger.debug(f"Fetched and cached gateway template {gatewaytemplate_id}: {response.data.get('name', 'unknown')}")
+                logger.debug(
+                    f"Fetched and cached gateway template {gatewaytemplate_id}: "
+                    f"{response.data.get('name', 'unknown')}"
+                )
                 return response.data
             else:
                 logger.warning(f"Could not fetch gateway template {gatewaytemplate_id}: {response.status_code}")
         except Exception as e:
             logger.warning(f"Error fetching gateway template {gatewaytemplate_id}: {str(e)}")
-        
+
         MistConnection._gateway_template_cache[cache_key] = {}
         return {}
 
-    def get_gateway_stats(self, site_id: Optional[str] = None, start: Optional[int] = None, end: Optional[int] = None) -> List[Dict]:
+    @staticmethod
+    def _cidr_to_dotted_netmask(cidr_int: int) -> str:
+        mask = (0xFFFFFFFF >> (32 - cidr_int)) << (32 - cidr_int)
+        return f"{(mask >> 24) & 0xff}.{(mask >> 16) & 0xff}.{(mask >> 8) & 0xff}.{mask & 0xff}"
+
+    @staticmethod
+    def _dotted_netmask_to_cidr(netmask_str: str) -> str:
+        if not netmask_str or "." not in netmask_str:
+            return netmask_str
+        parts = netmask_str.split(".")
+        binary = "".join([bin(int(x) + 256)[3:] for x in parts])
+        return str(binary.count("1"))
+
+    def _fetch_gateway_device_list(self) -> list:
+        device_response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
+            self.apisession, self.org_id, type="gateway", limit=1000
+        )
+        if self._handle_rate_limit_response(device_response):
+            device_response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
+                self.apisession, self.org_id, type="gateway", limit=1000
+            )
+        if device_response.status_code != 200:
+            raise Exception(f"API error getting device stats: {device_response.status_code}")
+        return mistapi.get_all(self.apisession, device_response)
+
+    def _fetch_org_port_stats_by_gateway(self, gateway_macs: set) -> tuple[dict, dict]:
+        wan_ports_by_device: dict = {}
+        all_ports_by_device: dict = {}
+        port_response = mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts(self.apisession, self.org_id, limit=1000)
+        if self._handle_rate_limit_response(port_response):
+            port_response = mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts(self.apisession, self.org_id, limit=1000)
+        if port_response.status_code != 200:
+            return wan_ports_by_device, all_ports_by_device
+
+        for port in mistapi.get_all(self.apisession, port_response):
+            device_mac = port.get("mac")
+            if device_mac not in gateway_macs:
+                continue
+            port_id = port.get("port_id", "")
+            all_ports_by_device.setdefault(device_mac, {})[port_id] = port
+            if port.get("port_usage") == "wan":
+                wan_ports_by_device.setdefault(device_mac, []).append(port)
+        return wan_ports_by_device, all_ports_by_device
+
+    def _fetch_device_config(self, gw_site_id: str, gw_id: str) -> dict:
+        if not (gw_site_id and gw_id) or self._is_rate_limited():
+            return {}
+        response = mistapi.api.v1.sites.devices.getSiteDevice(self.apisession, gw_site_id, gw_id)
+        if response.status_code == 429:
+            if not self._mark_token_rate_limited():
+                logger.warning("All tokens rate limited - returning partial data")
+            return {}
+        if response.status_code == 200:
+            return response.data
+        return {}
+
+    def _build_merged_port_config(self, gw_id: str, deviceprofile_id: str | None, device_config: dict) -> dict:
+        merged: dict = {}
+        gatewaytemplate_id = None if deviceprofile_id else device_config.get("gatewaytemplate_id")
+
+        if deviceprofile_id:
+            profile_data = self._get_device_profile(deviceprofile_id)
+            if profile_data and "port_config" in profile_data:
+                merged = dict(profile_data.get("port_config", {}))
+                logger.debug(
+                    f"Gateway {gw_id} (Hub) using device profile " f"{deviceprofile_id} with {len(merged)} ports"
+                )
+        elif gatewaytemplate_id:
+            template_data = self._get_gateway_template(gatewaytemplate_id)
+            if template_data and "port_config" in template_data:
+                merged = dict(template_data.get("port_config", {}))
+                logger.debug(
+                    f"Gateway {gw_id} (Branch) using gateway template " f"{gatewaytemplate_id} with {len(merged)} ports"
+                )
+
+        for port_name, port_cfg in device_config.get("port_config", {}).items():
+            if port_name in merged:
+                merged[port_name].update(port_cfg)
+            else:
+                merged[port_name] = port_cfg
+        return merged
+
+    @staticmethod
+    def _extract_wan_port_configs(merged_port_config: dict) -> dict:
+        wan_cfg: dict = {}
+        for port_name, port_cfg in merged_port_config.items():
+            if port_cfg.get("usage") != "wan":
+                continue
+            ip_cfg = port_cfg.get("ip_config", {})
+            vlan_id = port_cfg.get("vlan_id", "")
+            wan_cfg[port_name] = {
+                "name": port_cfg.get("name", ""),
+                "description": port_cfg.get("description", "").strip(),
+                "ip": ip_cfg.get("ip", ""),
+                "netmask": ip_cfg.get("netmask", ""),
+                "gateway": ip_cfg.get("gateway", ""),
+                "type": ip_cfg.get("type", "dhcp"),
+                "vlan_id": str(vlan_id) if vlan_id else "",
+                "override": "yes" if port_cfg.get("override", False) else "no",
+                "disabled": port_cfg.get("disabled", False),
+            }
+        return wan_cfg
+
+    def _fetch_runtime_ips(self, gw_site_id: str, gw_mac: str) -> dict:
+        runtime: dict = {}
+        if not gw_site_id or self._is_rate_limited():
+            return runtime
+        response = mistapi.api.v1.sites.devices.searchSiteDevices(
+            self.apisession, gw_site_id, type="gateway", mac=gw_mac, stats=True
+        )
+        if response.status_code == 429:
+            if not self._mark_token_rate_limited():
+                logger.warning("All tokens rate limited - returning partial data")
+            return runtime
+        if response.status_code != 200:
+            return runtime
+
+        results = response.data.get("results", [])
+        if not results or "if_stat" not in results[0]:
+            return runtime
+        for _if_name, if_data in results[0]["if_stat"].items():
+            if if_data.get("port_usage") != "wan":
+                continue
+            ips = if_data.get("ips", [])
+            if not ips or "/" not in ips[0]:
+                continue
+            ip, cidr = ips[0].split("/")
+            runtime[if_data.get("port_id", "")] = {
+                "ip": ip,
+                "netmask": self._cidr_to_dotted_netmask(int(cidr)),
+                "address_mode": if_data.get("address_mode", "Unknown"),
+            }
+        return runtime
+
+    @staticmethod
+    def _match_wan_config_for_port(port_id: str, port_desc: str, wan_cfg_by_name: dict) -> dict:
+        cfg = wan_cfg_by_name.get(port_id, {})
+        if cfg:
+            return cfg
+        for cfg_name, c in wan_cfg_by_name.items():
+            if cfg_name.startswith(port_id + "."):
+                return c
+        if port_desc:
+            for _cfg_name, c in wan_cfg_by_name.items():
+                if c.get("description") == port_desc:
+                    return c
+        return {}
+
+    def _resolve_ip_and_netmask(self, port_config: dict, runtime_ip_data: dict) -> tuple[str, str]:
+        if runtime_ip_data and port_config.get("type") == "dhcp":
+            return (
+                runtime_ip_data.get("ip", ""),
+                self._dotted_netmask_to_cidr(runtime_ip_data.get("netmask", "")),
+            )
+        ip_addr = port_config.get("ip", "").strip()
+        netmask = port_config.get("netmask", "").strip()
+        if netmask.startswith("/"):
+            netmask = netmask[1:]
+        return ip_addr, netmask
+
+    @staticmethod
+    def _build_wan_port_from_stats(port: dict, port_config: dict, ip_addr: str, netmask: str) -> dict:
+        return {
+            "name": port.get("port_id"),
+            "wan_name": port_config.get("name", ""),
+            "description": port_config.get("description", port.get("port_desc", "")),
+            "enabled": port.get("up", False) and not port_config.get("disabled", False),
+            "usage": "wan",
+            "ip": ip_addr,
+            "netmask": netmask,
+            "gateway": port_config.get("gateway", ""),
+            "type": port_config.get("type", "unknown"),
+            "vlan_id": port_config.get("vlan_id", ""),
+            "override": port_config.get("override", "no"),
+            "up": port.get("up", False),
+            "rx_bytes": port.get("rx_bytes", 0),
+            "tx_bytes": port.get("tx_bytes", 0),
+            "rx_pkts": port.get("rx_pkts", 0),
+            "tx_pkts": port.get("tx_pkts", 0),
+            "rx_errors": port.get("rx_errors", 0),
+            "tx_errors": port.get("tx_errors", 0),
+            "speed": port.get("speed", 0),
+            "mac": port.get("port_mac", ""),
+        }
+
+    @staticmethod
+    def _build_wan_port_from_config(
+        base_port_name: str, cfg: dict, ip_addr: str, netmask: str, port_stats: dict
+    ) -> dict:
+        physical_up = port_stats.get("up", False)
+        return {
+            "name": base_port_name,
+            "wan_name": cfg.get("name", ""),
+            "description": cfg.get("description", ""),
+            "enabled": physical_up and not cfg.get("disabled", False),
+            "usage": "wan",
+            "ip": ip_addr,
+            "netmask": netmask,
+            "gateway": cfg.get("gateway", ""),
+            "type": cfg.get("type", "unknown"),
+            "vlan_id": cfg.get("vlan_id", ""),
+            "override": cfg.get("override", "no"),
+            "up": physical_up,
+            "rx_bytes": port_stats.get("rx_bytes", 0),
+            "tx_bytes": port_stats.get("tx_bytes", 0),
+            "rx_pkts": port_stats.get("rx_pkts", 0),
+            "tx_pkts": port_stats.get("tx_pkts", 0),
+            "rx_errors": port_stats.get("rx_errors", 0),
+            "tx_errors": port_stats.get("tx_errors", 0),
+            "speed": port_stats.get("speed", 0),
+            "mac": port_stats.get("port_mac", ""),
+        }
+
+    def _build_ports_from_live_stats(self, wan_ports: list, wan_cfg_by_name: dict, runtime_ips_by_port: dict) -> list:
+        default_cfg = {
+            "name": "",
+            "description": "",
+            "ip": "",
+            "netmask": "",
+            "gateway": "",
+            "type": "dhcp",
+            "vlan_id": "",
+            "override": "no",
+            "disabled": False,
+        }
+        results = []
+        for port in wan_ports:
+            port_id = port.get("port_id")
+            port_desc = port.get("port_desc", "").strip()
+            port_config = self._match_wan_config_for_port(port_id, port_desc, wan_cfg_by_name)
+            if not port_config:
+                port_config = {**default_cfg, "description": port_desc}
+            ip_addr, netmask = self._resolve_ip_and_netmask(port_config, runtime_ips_by_port.get(port_id, {}))
+            results.append(self._build_wan_port_from_stats(port, port_config, ip_addr, netmask))
+        return results
+
+    def _build_ports_from_config_only(
+        self,
+        wan_cfg_by_name: dict,
+        runtime_ips_by_port: dict,
+        device_port_stats: dict,
+        ports_with_stats: set,
+    ) -> list:
+        results = []
+        for cfg_port_name, cfg in wan_cfg_by_name.items():
+            if "{{" in cfg_port_name or "}}" in cfg_port_name:
+                continue
+            base_port_name = cfg_port_name.split(".")[0] if "." in cfg_port_name else cfg_port_name
+            if cfg_port_name in ports_with_stats or base_port_name in ports_with_stats:
+                continue
+            ip_addr, netmask = self._resolve_ip_and_netmask(cfg, runtime_ips_by_port.get(base_port_name, {}))
+            port_stats = device_port_stats.get(base_port_name, {})
+            results.append(self._build_wan_port_from_config(base_port_name, cfg, ip_addr, netmask, port_stats))
+        return results
+
+    @staticmethod
+    def _ports_with_stats_set(port_configs: list) -> set:
+        s: set = set()
+        for pc in port_configs:
+            name = pc.get("name", "")
+            s.add(name)
+            if "." in name:
+                s.add(name.split(".")[0])
+        return s
+
+    def _process_gateway(
+        self,
+        gw: dict,
+        wan_ports_by_device: dict,
+        all_ports_by_device: dict,
+        inventory_map: dict,
+        site_map: dict,
+    ) -> dict:
+        gw_site_id = gw.get("site_id")
+        gw_id = gw.get("id")
+        gw_mac = gw.get("mac")
+        gw_site_name = site_map.get(gw_site_id, "")
+        if not gw_site_name and gw_site_id:
+            logger.warning(f"Site {gw_site_id} not found in cached site map")
+
+        wan_ports = wan_ports_by_device.get(gw_mac, [])
+        device_port_stats = all_ports_by_device.get(gw_mac, {})
+
+        port_configs: list = []
+        try:
+            deviceprofile_id = inventory_map.get(gw_mac, {}).get("deviceprofile_id")
+            device_config = self._fetch_device_config(gw_site_id, gw_id)
+            merged_port_config = self._build_merged_port_config(gw_id, deviceprofile_id, device_config)
+            wan_cfg_by_name = self._extract_wan_port_configs(merged_port_config)
+            runtime_ips_by_port = self._fetch_runtime_ips(gw_site_id, gw_mac)
+
+            port_configs = self._build_ports_from_live_stats(wan_ports, wan_cfg_by_name, runtime_ips_by_port)
+            port_configs.extend(
+                self._build_ports_from_config_only(
+                    wan_cfg_by_name,
+                    runtime_ips_by_port,
+                    device_port_stats,
+                    self._ports_with_stats_set(port_configs),
+                )
+            )
+        except Exception as e:
+            logger.warning(f"Could not process config for gateway {gw_id}: {str(e)}")
+
+        port_configs.sort(key=lambda p: p.get("name", ""))
+        return {
+            "id": gw_id,
+            "name": gw.get("name", "Unknown"),
+            "site_id": gw_site_id,
+            "site_name": gw_site_name,
+            "model": gw.get("model", ""),
+            "version": gw.get("version", ""),
+            "status": gw.get("status", "unknown"),
+            "uptime": gw.get("uptime", 0),
+            "ip": gw.get("ip", ""),
+            "mac": gw_mac,
+            "ports": port_configs,
+            "num_ports": len(port_configs),
+        }
+
+    def get_gateway_stats(
+        self,
+        site_id: str | None = None,
+        start: int | None = None,  # noqa: ARG002 - preserved for API compat; snapshot uses cumulative counters
+        end: int | None = None,  # noqa: ARG002 - preserved for API compat
+    ) -> list[dict]:
         """
-        Get gateway statistics including WAN port information
-        
-        API call optimization strategy:
-        1. Sites: Cached at class level (1 call per 5 min)
-        2. Device stats: Single org-level call
-        3. Port stats: Single org-level call (includes traffic data)
-        4. Device configs: Batch fetch using org-level inventory search
-        5. Profiles/Templates: Cached at class level (1 call per unique profile)
-        
-        Args:
-            site_id: Optional site ID to filter gateways
-            start: Start time as Unix epoch timestamp
-            end: End time as Unix epoch timestamp
-            
-        Returns:
-            List of gateways with their WAN port statistics and configuration
+        Get gateway statistics including WAN port information.
+
+        Orchestrates the fan-out; see helper methods for per-step work.
         """
         try:
             if not self.org_id:
                 raise ValueError("Organization ID is required")
-            
-            # Get site names mapping (cached)
-            sites = self.get_sites()
-            site_map = {s['id']: s['name'] for s in sites}
-            
-            # Get gateway device stats for basic info (with pagination)
-            device_response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
-                self.apisession,
-                self.org_id,
-                type='gateway',
-                limit=1000
-            )
-            
-            if self._handle_rate_limit_response(device_response):
-                device_response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
-                    self.apisession,
-                    self.org_id,
-                    type='gateway',
-                    limit=1000
-                )
-            
-            if device_response.status_code != 200:
-                raise Exception(f"API error getting device stats: {device_response.status_code}")
-            
-            # Use get_all to handle pagination automatically
-            gateways = mistapi.get_all(self.apisession, device_response)
-            
-            # Get ALL port statistics using org-level endpoint
-            # This returns physical port status for all gateways
-            wan_ports_by_device = {}
-            all_ports_by_device = {}  # Track all ports for physical status
-            
-            # Build a set of gateway MACs for filtering port results
-            gateway_macs = {gw.get('mac') for gw in gateways if gw.get('mac')}
-            
-            # searchOrgSwOrGwPorts returns current cumulative port counters (not a
-            # time-range aggregate). The SDK no longer accepts start/end kwargs; the
-            # provided window is used elsewhere for time-series charts, not for the
-            # gateway-list snapshot rendered here.
-            port_response = mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts(
-                self.apisession,
-                self.org_id,
-                limit=1000,
-            )
 
-            if self._handle_rate_limit_response(port_response):
-                port_response = mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts(
-                    self.apisession,
-                    self.org_id,
-                    limit=1000,
-                )
-            
-            if port_response.status_code == 200:
-                # Use get_all to handle pagination automatically
-                all_ports = mistapi.get_all(self.apisession, port_response)
-                for port in all_ports:
-                    device_mac = port.get('mac')
-                    port_id = port.get('port_id', '')
-                    
-                    # Only process ports belonging to gateways we care about
-                    if device_mac not in gateway_macs:
-                        continue
-                    
-                    # Store all ports for physical status lookup
-                    if device_mac not in all_ports_by_device:
-                        all_ports_by_device[device_mac] = {}
-                    all_ports_by_device[device_mac][port_id] = port
-                    
-                    # Also track WAN ports separately
-                    if port.get('port_usage') == 'wan':
-                        if device_mac not in wan_ports_by_device:
-                            wan_ports_by_device[device_mac] = []
-                        wan_ports_by_device[device_mac].append(port)
-            
-            # Batch fetch inventory data for profile IDs (1 API call)
+            sites = self.get_sites()
+            site_map = {s["id"]: s["name"] for s in sites}
+            gateways = self._fetch_gateway_device_list()
+            gateway_macs = {gw.get("mac") for gw in gateways if gw.get("mac")}
+            wan_ports_by_device, all_ports_by_device = self._fetch_org_port_stats_by_gateway(gateway_macs)
             inventory_map = self._batch_fetch_inventory(gateway_macs)
-            
-            gateway_stats = []
-            
-            for gw in gateways:
-                # Filter by site if specified
-                if site_id and gw.get('site_id') != site_id:
-                    continue
-                
-                gw_site_id = gw.get('site_id')
-                gw_id = gw.get('id')
-                gw_mac = gw.get('mac')
-                
-                # Get site name - fallback is unlikely with proper caching
-                gw_site_name = site_map.get(gw_site_id, '')
-                if not gw_site_name and gw_site_id:
-                    # Only log warning, don't make extra API call
-                    logger.warning(f"Site {gw_site_id} not found in cached site map")
-                
-                # Get WAN ports for this gateway
-                wan_ports = wan_ports_by_device.get(gw_mac, [])
-                
-                # Get all port physical status for this gateway (from org-level port stats)
-                device_port_stats = all_ports_by_device.get(gw_mac, {})
-                
-                # Get device configuration
-                port_configs = []
-                wan_port_config_by_name = {}  # Map by port name (e.g., 'ge-0/0/1.30') for matching
-                runtime_ips_by_port = {}  # Map of port_id -> actual runtime IP/netmask from if_stat
-                
-                # Get profile ID from batch inventory
-                inventory_data = inventory_map.get(gw_mac, {})
-                deviceprofile_id = inventory_data.get('deviceprofile_id')
-                
-                try:
-                    # Get device configuration for port_config and gatewaytemplate_id
-                    # This is needed per-device but profile fetches are cached
-                    # Skip if we've been rate limited on all tokens
-                    device_config = {}
-                    gatewaytemplate_id = None
-                    if gw_site_id and gw_id and not self._is_rate_limited():
-                        config_response = mistapi.api.v1.sites.devices.getSiteDevice(
-                            self.apisession,
-                            gw_site_id,
-                            gw_id
-                        )
-                        if config_response.status_code == 429:
-                            if not self._mark_token_rate_limited():
-                                logger.warning("All tokens rate limited - returning partial data")
-                        elif config_response.status_code == 200:
-                            device_config = config_response.data
-                            # Use device config's gatewaytemplate_id if not a Hub device
-                            if not deviceprofile_id:
-                                gatewaytemplate_id = device_config.get('gatewaytemplate_id')
-                    
-                    # Start with device profile OR gateway template port_config
-                    # Hub devices use deviceprofile_id, Branch/Spoke devices use gatewaytemplate_id
-                    merged_port_config = {}
-                    if deviceprofile_id:
-                        # Hub device - get config from device profile (class-level cache)
-                        profile_data = self._get_device_profile(deviceprofile_id)
-                        if profile_data and 'port_config' in profile_data:
-                            merged_port_config = dict(profile_data.get('port_config', {}))
-                            logger.debug(f"Gateway {gw_id} (Hub) using device profile {deviceprofile_id} with {len(merged_port_config)} ports")
-                    elif gatewaytemplate_id:
-                        # Branch/Spoke device - get config from gateway template (class-level cache)
-                        template_data = self._get_gateway_template(gatewaytemplate_id)
-                        if template_data and 'port_config' in template_data:
-                            merged_port_config = dict(template_data.get('port_config', {}))
-                            logger.debug(f"Gateway {gw_id} (Branch) using gateway template {gatewaytemplate_id} with {len(merged_port_config)} ports")
-                    
-                    # Merge device-level port_config (overrides profile settings)
-                    device_port_config = device_config.get('port_config', {})
-                    if device_port_config:
-                        for port_name, port_cfg in device_port_config.items():
-                            if port_name in merged_port_config:
-                                # Merge: device config overrides profile
-                                merged_port_config[port_name].update(port_cfg)
-                            else:
-                                merged_port_config[port_name] = port_cfg
-                    
-                    # Extract WAN port configurations keyed by port name
-                    for port_name, port_cfg in merged_port_config.items():
-                        if port_cfg.get('usage') == 'wan':
-                            ip_cfg = port_cfg.get('ip_config', {})
-                            description = port_cfg.get('description', '').strip()
-                            vlan_id = port_cfg.get('vlan_id', '')
-                            
-                            wan_port_config_by_name[port_name] = {
-                                'name': port_cfg.get('name', ''),
-                                'description': description,
-                                'ip': ip_cfg.get('ip', ''),
-                                'netmask': ip_cfg.get('netmask', ''),
-                                'gateway': ip_cfg.get('gateway', ''),
-                                'type': ip_cfg.get('type', 'dhcp'),
-                                'vlan_id': str(vlan_id) if vlan_id else '',
-                                'override': 'yes' if port_cfg.get('override', False) else 'no',
-                                'disabled': port_cfg.get('disabled', False)
-                            }
-                    
-                    # Get runtime IPs from searchSiteDevices (needed for DHCP IP addresses)
-                    # Skip if all tokens are rate limited
-                    if gw_site_id and not self._is_rate_limited():
-                        device_search_response = mistapi.api.v1.sites.devices.searchSiteDevices(
-                            self.apisession,
-                            gw_site_id,
-                            type='gateway',
-                            mac=gw_mac,
-                            stats=True
-                        )
-                        
-                        if device_search_response.status_code == 429:
-                            if not self._mark_token_rate_limited():
-                                logger.warning("All tokens rate limited - returning partial data")
-                        elif device_search_response.status_code == 200:
-                            search_results = device_search_response.data.get('results', [])
-                            if search_results and 'if_stat' in search_results[0]:
-                                if_stat = search_results[0]['if_stat']
-                                
-                                for if_name, if_data in if_stat.items():
-                                    if if_data.get('port_usage') == 'wan':
-                                        port_id = if_data.get('port_id', '')
-                                        ips = if_data.get('ips', [])
-                                        
-                                        # Parse IP/CIDR notation (e.g., "192.168.20.2/24")
-                                        if ips and len(ips) > 0 and '/' in ips[0]:
-                                            ip_cidr = ips[0]
-                                            ip, cidr = ip_cidr.split('/')
-                                            
-                                            # Convert CIDR to netmask
-                                            cidr_int = int(cidr)
-                                            mask = (0xffffffff >> (32 - cidr_int)) << (32 - cidr_int)
-                                            netmask = f"{(mask >> 24) & 0xff}.{(mask >> 16) & 0xff}.{(mask >> 8) & 0xff}.{mask & 0xff}"
-                                            
-                                            runtime_ips_by_port[port_id] = {
-                                                'ip': ip,
-                                                'netmask': netmask,
-                                                'address_mode': if_data.get('address_mode', 'Unknown')
-                                            }
-                except Exception as e:
-                    logger.warning(f"Could not process config for gateway {gw_id}: {str(e)}")
-                
-                # Combine WAN port stats with IP configuration
-                for port in wan_ports:
-                    port_id = port.get('port_id')  # e.g., 'ge-0/0/1' or 'ge-0/0/1.30'
-                    port_desc = port.get('port_desc', '').strip()
-                    
-                    # Match by port_id (exact match first)
-                    port_config = wan_port_config_by_name.get(port_id, {})
-                    
-                    # If no exact match, try to find VLAN-tagged config for base interface
-                    # e.g., port_id='ge-0/0/3' should match config key 'ge-0/0/3.301'
-                    if not port_config:
-                        for cfg_name, cfg in wan_port_config_by_name.items():
-                            # Check if config key starts with port_id and has VLAN suffix
-                            if cfg_name.startswith(port_id + '.'):
-                                port_config = cfg
-                                break
-                    
-                    # If still no match, try by description (fallback)
-                    if not port_config and port_desc:
-                        for cfg_name, cfg in wan_port_config_by_name.items():
-                            if cfg.get('description') == port_desc:
-                                port_config = cfg
-                                break
-                    
-                    # If still no match, use defaults
-                    if not port_config:
-                        port_config = {
-                            'name': '',
-                            'description': port_desc,
-                            'ip': '',
-                            'netmask': '',
-                            'gateway': '',
-                            'type': 'dhcp',  # Default to DHCP for unconfigured ports
-                            'vlan_id': '',
-                            'override': 'no',
-                            'disabled': False
-                        }
-                    
-                    # Get actual runtime IP (prioritize runtime IP for DHCP ports)
-                    runtime_ip_data = runtime_ips_by_port.get(port_id, {})
-                    
-                    # Use runtime IP if available (for DHCP ports)
-                    if runtime_ip_data and port_config.get('type') == 'dhcp':
-                        ip_addr = runtime_ip_data.get('ip', '')
-                        netmask_str = runtime_ip_data.get('netmask', '')
-                        # Convert dotted-decimal netmask to CIDR
-                        if netmask_str and '.' in netmask_str:
-                            parts = netmask_str.split('.')
-                            binary = ''.join([bin(int(x)+256)[3:] for x in parts])
-                            netmask = str(binary.count('1'))
-                        else:
-                            netmask = netmask_str
-                    else:
-                        # Use configured static IP
-                        ip_addr = port_config.get('ip', '').strip()
-                        netmask = port_config.get('netmask', '').strip()
-                        
-                        # Remove leading slash from netmask if present (CIDR notation)
-                        if netmask.startswith('/'):
-                            netmask = netmask[1:]
-                    
-                    # Cumulative counters from org-level port search (current-state snapshot).
-                    rx_bytes = port.get('rx_bytes', 0)
-                    tx_bytes = port.get('tx_bytes', 0)
-                    
-                    port_configs.append({
-                        'name': port_id,
-                        'wan_name': port_config.get('name', ''),  # WAN name from config (e.g., 'BB-Hub-1')
-                        'description': port_config.get('description', port.get('port_desc', '')),
-                        'enabled': port.get('up', False) and not port_config.get('disabled', False),
-                        'usage': 'wan',
-                        # IP Configuration (runtime for DHCP, configured for static)
-                        'ip': ip_addr,
-                        'netmask': netmask,
-                        'gateway': port_config.get('gateway', ''),
-                        'type': port_config.get('type', 'unknown'),
-                        'vlan_id': port_config.get('vlan_id', ''),
-                        'override': port_config.get('override', 'no'),
-                        # Statistics from org-level port search
-                        'up': port.get('up', False),
-                        'rx_bytes': rx_bytes,
-                        'tx_bytes': tx_bytes,
-                        'rx_pkts': port.get('rx_pkts', 0),
-                        'tx_pkts': port.get('tx_pkts', 0),
-                        'rx_errors': port.get('rx_errors', 0),
-                        'tx_errors': port.get('tx_errors', 0),
-                        'speed': port.get('speed', 0),
-                        'mac': port.get('port_mac', '')
-                    })
-                
-                # Add WAN ports from config that don't have stats yet
-                # These are configured WAN ports that may be down or not reporting stats
-                ports_with_stats = set()
-                for pc in port_configs:
-                    ports_with_stats.add(pc.get('name', ''))
-                    # Also track base interface for VLAN-tagged ports
-                    port_name = pc.get('name', '')
-                    if '.' in port_name:
-                        base_port = port_name.split('.')[0]
-                        ports_with_stats.add(base_port)
-                
-                for cfg_port_name, cfg in wan_port_config_by_name.items():
-                    # Skip Jinja template variables (unresolved template placeholders)
-                    if '{{' in cfg_port_name or '}}' in cfg_port_name:
-                        continue
-                    
-                    # Extract base port name (e.g., 'ge-0/0/1' from 'ge-0/0/1.30')
-                    base_port_name = cfg_port_name.split('.')[0] if '.' in cfg_port_name else cfg_port_name
-                    
-                    # Skip if we already have stats for this port
-                    if cfg_port_name in ports_with_stats or base_port_name in ports_with_stats:
-                        continue
-                    
-                    # Get runtime IP if available
-                    runtime_ip_data = runtime_ips_by_port.get(base_port_name, {})
-                    if runtime_ip_data and cfg.get('type') == 'dhcp':
-                        ip_addr = runtime_ip_data.get('ip', '')
-                        netmask_str = runtime_ip_data.get('netmask', '')
-                        if netmask_str and '.' in netmask_str:
-                            parts = netmask_str.split('.')
-                            binary = ''.join([bin(int(x)+256)[3:] for x in parts])
-                            netmask = str(binary.count('1'))
-                        else:
-                            netmask = netmask_str
-                    else:
-                        ip_addr = cfg.get('ip', '').strip()
-                        netmask = cfg.get('netmask', '').strip()
-                        if netmask.startswith('/'):
-                            netmask = netmask[1:]
-                    
-                    # Get physical port status from org-level port stats
-                    port_stats = device_port_stats.get(base_port_name, {})
-                    physical_up = port_stats.get('up', False)
-                    port_speed = port_stats.get('speed', 0)
-                    
-                    port_configs.append({
-                        'name': base_port_name,
-                        'wan_name': cfg.get('name', ''),
-                        'description': cfg.get('description', ''),
-                        'enabled': physical_up and not cfg.get('disabled', False),
-                        'usage': 'wan',
-                        'ip': ip_addr,
-                        'netmask': netmask,
-                        'gateway': cfg.get('gateway', ''),
-                        'type': cfg.get('type', 'unknown'),
-                        'vlan_id': cfg.get('vlan_id', ''),
-                        'override': cfg.get('override', 'no'),
-                        'up': physical_up,  # Physical status from org port stats
-                        'rx_bytes': port_stats.get('rx_bytes', 0),
-                        'tx_bytes': port_stats.get('tx_bytes', 0),
-                        'rx_pkts': port_stats.get('rx_pkts', 0),
-                        'tx_pkts': port_stats.get('tx_pkts', 0),
-                        'rx_errors': port_stats.get('rx_errors', 0),
-                        'tx_errors': port_stats.get('tx_errors', 0),
-                        'speed': port_speed,
-                        'mac': port_stats.get('port_mac', '')
-                    })
-                
-                # Sort ports by name for consistent display
-                port_configs.sort(key=lambda p: p.get('name', ''))
-                
-                gateway_stats.append({
-                    'id': gw_id,
-                    'name': gw.get('name', 'Unknown'),
-                    'site_id': gw_site_id,
-                    'site_name': gw_site_name,
-                    'model': gw.get('model', ''),
-                    'version': gw.get('version', ''),
-                    'status': gw.get('status', 'unknown'),
-                    'uptime': gw.get('uptime', 0),
-                    'ip': gw.get('ip', ''),
-                    'mac': gw_mac,
-                    'ports': port_configs,
-                    'num_ports': len(port_configs)
-                })
-            
-            return gateway_stats
+
+            return [
+                self._process_gateway(gw, wan_ports_by_device, all_ports_by_device, inventory_map, site_map)
+                for gw in gateways
+                if not site_id or gw.get("site_id") == site_id
+            ]
         except Exception as e:
             logger.error(f"Error getting gateway stats: {str(e)}")
             raise
-    
-    def get_gateway_port_stats(self, gateway_id: str) -> Dict:
-        """
-        Get detailed port statistics for a specific gateway
 
-        Args:
-            gateway_id: Gateway device ID (Mist composite UUID)
-
-        Returns:
-            Detailed port statistics
-        """
-        try:
-            if not self.org_id:
-                raise ValueError("Organization ID is required")
-
-            # Mist device_id is the composite UUID (00000000-0000-0000-1000-<mac>).
-            # listOrgDevicesStats returns id/name/site_id/mac reliably and accepts
-            # the 12-char mac suffix as a filter (searchOrgDevices does too, but
-            # its payload lacks id/name for SSR).
-            mac_filter = gateway_id.replace('-', '')[-12:] if gateway_id else gateway_id
+    def _resolve_gateway_by_id(self, gateway_id: str) -> dict:
+        """Resolve gateway id → device stats dict via listOrgDevicesStats."""
+        mac_filter = gateway_id.replace("-", "")[-12:] if gateway_id else gateway_id
+        response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
+            self.apisession,
+            self.org_id,
+            type="gateway",
+            mac=mac_filter,
+        )
+        if self._handle_rate_limit_response(response):
             response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
                 self.apisession,
                 self.org_id,
-                type='gateway',
+                type="gateway",
                 mac=mac_filter,
             )
+        if response.status_code != 200:
+            raise Exception(f"API error: {response.status_code}")
+        results = response.data if isinstance(response.data, list) else []
+        return results[0] if results else {}
 
-            if self._handle_rate_limit_response(response):
-                response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
-                    self.apisession,
-                    self.org_id,
-                    type='gateway',
-                    mac=mac_filter,
-                )
+    @staticmethod
+    def _extract_port_stats_from_device(dev: dict) -> dict:
+        """Extract per-port stats dict from a site-device stats payload."""
+        raw_ports = dev.get("port_stat") or dev.get("if_stat") or {}
+        port_stats: dict = {}
+        for port_name, port_data in raw_ports.items():
+            if not isinstance(port_data, dict):
+                continue
+            port_stats[port_name] = {
+                "up": port_data.get("up", False),
+                "rx_bytes": port_data.get("rx_bytes", 0),
+                "tx_bytes": port_data.get("tx_bytes", 0),
+                "rx_pkts": port_data.get("rx_pkts", 0),
+                "tx_pkts": port_data.get("tx_pkts", 0),
+                "rx_errors": port_data.get("rx_errors", 0),
+                "tx_errors": port_data.get("tx_errors", 0),
+                "rx_bps": port_data.get("rx_bps", 0),
+                "tx_bps": port_data.get("tx_bps", 0),
+                "speed": port_data.get("speed", 0),
+                "mac": port_data.get("mac", ""),
+                "full_duplex": port_data.get("full_duplex", True),
+            }
+        return port_stats
 
-            if response.status_code != 200:
-                raise Exception(f"API error: {response.status_code}")
+    def _fetch_site_device_port_stats(self, site_id: str, device_id: str) -> tuple[dict, int]:
+        """Fetch port stats + last-seen timestamp from site-scoped device stats."""
+        if not (site_id and device_id):
+            return {}, 0
+        port_resp = mistapi.api.v1.sites.stats.getSiteDeviceStats(self.apisession, site_id, device_id)
+        if self._handle_rate_limit_response(port_resp):
+            port_resp = mistapi.api.v1.sites.stats.getSiteDeviceStats(self.apisession, site_id, device_id)
+        if port_resp.status_code != 200 or not isinstance(port_resp.data, dict):
+            return {}, 0
+        dev = port_resp.data
+        return self._extract_port_stats_from_device(dev), dev.get("last_seen", 0) or 0
 
-            results = response.data if isinstance(response.data, list) else []
-            gw = results[0] if results else {}
-            gateway_name = gw.get('name') or gw.get('hostname') or 'Unknown'
-            site_id = gw.get('site_id')
-            resolved_id = gw.get('id') or gateway_id
-
-            # Fetch port_stat / if_stat from the site-scoped device stats endpoint.
-            port_stats = {}
-            timestamp = 0
-            if site_id and resolved_id:
-                port_resp = mistapi.api.v1.sites.stats.getSiteDeviceStats(
-                    self.apisession, site_id, resolved_id
-                )
-                if self._handle_rate_limit_response(port_resp):
-                    port_resp = mistapi.api.v1.sites.stats.getSiteDeviceStats(
-                        self.apisession, site_id, resolved_id
-                    )
-                if port_resp.status_code == 200 and isinstance(port_resp.data, dict):
-                    dev = port_resp.data
-                    timestamp = dev.get('last_seen', 0) or 0
-                    # SSR gateways expose per-interface stats under `if_stat`; SRX
-                    # style gateways historically used `port_stat`.
-                    raw_ports = dev.get('port_stat') or dev.get('if_stat') or {}
-                    for port_name, port_data in raw_ports.items():
-                        if not isinstance(port_data, dict):
-                            continue
-                        port_stats[port_name] = {
-                            'up': port_data.get('up', False),
-                            'rx_bytes': port_data.get('rx_bytes', 0),
-                            'tx_bytes': port_data.get('tx_bytes', 0),
-                            'rx_pkts': port_data.get('rx_pkts', 0),
-                            'tx_pkts': port_data.get('tx_pkts', 0),
-                            'rx_errors': port_data.get('rx_errors', 0),
-                            'tx_errors': port_data.get('tx_errors', 0),
-                            'rx_bps': port_data.get('rx_bps', 0),
-                            'tx_bps': port_data.get('tx_bps', 0),
-                            'speed': port_data.get('speed', 0),
-                            'mac': port_data.get('mac', ''),
-                            'full_duplex': port_data.get('full_duplex', True),
-                        }
-
+    def get_gateway_port_stats(self, gateway_id: str) -> dict:
+        """Get detailed port statistics for a specific gateway."""
+        try:
+            if not self.org_id:
+                raise ValueError("Organization ID is required")
+            gw = self._resolve_gateway_by_id(gateway_id)
+            gateway_name = gw.get("name") or gw.get("hostname") or "Unknown"
+            resolved_id = gw.get("id") or gateway_id
+            port_stats, timestamp = self._fetch_site_device_port_stats(gw.get("site_id"), resolved_id)
             return {
-                'gateway_id': resolved_id,
-                'gateway_name': gateway_name,
-                'ports': port_stats,
-                'timestamp': timestamp,
+                "gateway_id": resolved_id,
+                "gateway_name": gateway_name,
+                "ports": port_stats,
+                "timestamp": timestamp,
             }
         except Exception as e:
             logger.error(f"Error getting gateway port stats: {str(e)}")
             raise
-    
-    def get_vpn_peer_stats(self, site_id: str, device_mac: str) -> Dict:
+
+    def get_vpn_peer_stats(self, site_id: str, device_mac: str) -> dict:
         """
         Get VPN peer path statistics for a gateway
-        
+
         Args:
             site_id: Site ID
             device_mac: Device MAC address
-            
+
         Returns:
             Dictionary with peer path statistics grouped by port_id
         """
         import requests
-        
+
         try:
             if not self.org_id:
                 raise ValueError("Organization ID is required")
-            
+
             # Check if we're currently rate limited on all tokens
             if self._is_rate_limited():
-                logger.debug(f"Skipping VPN peer stats - all tokens rate limited")
-                return {
-                    'success': False,
-                    'rate_limited': True,
-                    'peers_by_port': {},
-                    'total_peers': 0
-                }
-            
-            headers = {
-                'Authorization': f'Token {self.api_token}',
-                'Content-Type': 'application/json'
-            }
-            
-            url = f'https://{self.host}/api/v1/orgs/{self.org_id}/stats/vpn_peers/search'
-            params = {
-                'site_id': site_id,
-                'mac': device_mac
-            }
-            
-            response = requests.get(url, headers=headers, params=params)
-            
+                logger.debug("Skipping VPN peer stats - all tokens rate limited")
+                return {"success": False, "rate_limited": True, "peers_by_port": {}, "total_peers": 0}
+
+            headers = {"Authorization": f"Token {self.api_token}", "Content-Type": "application/json"}
+
+            url = f"https://{self.host}/api/v1/orgs/{self.org_id}/stats/vpn_peers/search"
+            params = {"site_id": site_id, "mac": device_mac}
+
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+
             if response.status_code == 429:
                 # Mark token as rate limited and try to switch
                 switched = self._mark_token_rate_limited()
                 if switched:
                     # Retry with new token
-                    headers['Authorization'] = f'Token {self.api_token}'
-                    response = requests.get(url, headers=headers, params=params)
+                    headers["Authorization"] = f"Token {self.api_token}"
+                    response = requests.get(url, headers=headers, params=params, timeout=30)
                     if response.status_code == 429:
                         self._mark_token_rate_limited()
-                
+
                 if response.status_code != 200:
-                    return {
-                        'success': False,
-                        'rate_limited': True,
-                        'peers_by_port': {},
-                        'total_peers': 0
-                    }
-            
+                    return {"success": False, "rate_limited": True, "peers_by_port": {}, "total_peers": 0}
+
             if response.status_code == 200:
                 data = response.json()
-                results = data.get('results', [])
-                
+                results = data.get("results", [])
+
                 # Group peer paths by port_id
                 peers_by_port = {}
                 for peer in results:
-                    port_id = peer.get('port_id', '')
+                    port_id = peer.get("port_id", "")
                     if port_id not in peers_by_port:
                         peers_by_port[port_id] = []
-                    peers_by_port[port_id].append({
-                        'vpn_name': peer.get('vpn_name', ''),
-                        'peer_router_name': peer.get('peer_router_name', ''),
-                        'peer_port_id': peer.get('peer_port_id', ''),
-                        'up': peer.get('up', False),
-                        'is_active': peer.get('is_active', False),
-                        'latency': peer.get('latency', 0),
-                        'loss': peer.get('loss', 0),
-                        'jitter': peer.get('jitter', 0),
-                        'mos': peer.get('mos', 0),
-                        'uptime': peer.get('uptime', 0),
-                        'mtu': peer.get('mtu', 0),
-                        'type': peer.get('type', ''),
-                        'hop_count': peer.get('hop_count', 0)
-                    })
-                
-                return {
-                    'success': True,
-                    'peers_by_port': peers_by_port,
-                    'total_peers': len(results)
-                }
+                    peers_by_port[port_id].append(
+                        {
+                            "vpn_name": peer.get("vpn_name", ""),
+                            "peer_router_name": peer.get("peer_router_name", ""),
+                            "peer_port_id": peer.get("peer_port_id", ""),
+                            "up": peer.get("up", False),
+                            "is_active": peer.get("is_active", False),
+                            "latency": peer.get("latency", 0),
+                            "loss": peer.get("loss", 0),
+                            "jitter": peer.get("jitter", 0),
+                            "mos": peer.get("mos", 0),
+                            "uptime": peer.get("uptime", 0),
+                            "mtu": peer.get("mtu", 0),
+                            "type": peer.get("type", ""),
+                            "hop_count": peer.get("hop_count", 0),
+                        }
+                    )
+
+                return {"success": True, "peers_by_port": peers_by_port, "total_peers": len(results)}
             else:
                 logger.warning(f"VPN peer stats API error {response.status_code} for device {device_mac}")
-                return {
-                    'success': False,
-                    'peers_by_port': {},
-                    'total_peers': 0
-                }
+                return {"success": False, "peers_by_port": {}, "total_peers": 0}
         except Exception as e:
             logger.warning(f"Error fetching VPN peer stats for device {device_mac}: {str(e)}")
-            return {
-                'success': False,
-                'peers_by_port': {},
-                'total_peers': 0
-            }
+            return {"success": False, "peers_by_port": {}, "total_peers": 0}
 
     # ------------------------------------------------------------------
     # WAN Insights feature — hourly bandwidth, wan_link_health, App Health SLE
     # ------------------------------------------------------------------
 
-    def _insights_gateway_stats(self, site_id: str, device_id: str, port_id: str,
-                                start: int, end: int, metrics: str) -> Dict:
+    def _insights_gateway_stats(
+        self, site_id: str, device_id: str, port_id: str, start: int, end: int, metrics: str
+    ) -> dict:
         """
         Shared helper: GET /api/v1/sites/{site_id}/insights/gateway/{device_id}/stats
         with port_id filter and 1h interval. Returns
@@ -1071,19 +953,16 @@ class MistConnection:
         import requests
 
         if self._is_rate_limited():
-            return {'success': False, 'rate_limited': True, 'data': None}
+            return {"success": False, "rate_limited": True, "data": None}
 
-        headers = {
-            'Authorization': f'Token {self.api_token}',
-            'Content-Type': 'application/json'
-        }
-        url = f'https://{self.host}/api/v1/sites/{site_id}/insights/gateway/{device_id}/stats'
+        headers = {"Authorization": f"Token {self.api_token}", "Content-Type": "application/json"}
+        url = f"https://{self.host}/api/v1/sites/{site_id}/insights/gateway/{device_id}/stats"
         params = {
-            'metrics': metrics,
-            'port_id': port_id,
-            'interval': '1h',
-            'start': start,
-            'end': end,
+            "metrics": metrics,
+            "port_id": port_id,
+            "interval": "1h",
+            "start": start,
+            "end": end,
         }
 
         try:
@@ -1092,25 +971,24 @@ class MistConnection:
             if response.status_code == 429:
                 switched = self._mark_token_rate_limited()
                 if switched:
-                    headers['Authorization'] = f'Token {self.api_token}'
+                    headers["Authorization"] = f"Token {self.api_token}"
                     response = requests.get(url, headers=headers, params=params, timeout=60)
                     if response.status_code == 429:
                         self._mark_token_rate_limited()
 
                 if response.status_code != 200:
-                    return {'success': False, 'rate_limited': True, 'data': None}
+                    return {"success": False, "rate_limited": True, "data": None}
 
             if response.status_code == 200:
-                return {'success': True, 'rate_limited': False, 'data': response.json()}
+                return {"success": True, "rate_limited": False, "data": response.json()}
 
             logger.warning(f"insights/gateway stats {response.status_code} metrics={metrics} port={port_id}")
-            return {'success': False, 'rate_limited': False, 'data': None}
+            return {"success": False, "rate_limited": False, "data": None}
         except Exception as e:
             logger.warning(f"insights/gateway stats error metrics={metrics} port={port_id}: {e}")
-            return {'success': False, 'rate_limited': False, 'data': None}
+            return {"success": False, "rate_limited": False, "data": None}
 
-    def get_gateway_hourly_bandwidth(self, site_id: str, device_id: str, port_id: str,
-                                     start: int, end: int) -> Dict:
+    def get_gateway_hourly_bandwidth(self, site_id: str, device_id: str, port_id: str, start: int, end: int) -> dict:
         """
         Return hourly Rx/Tx bandwidth for one WAN port.
 
@@ -1128,43 +1006,69 @@ class MistConnection:
             }
         """
         result = self._insights_gateway_stats(
-            site_id, device_id, port_id, start, end,
-            metrics='tx_bps,rx_bps,max_tx_bps,max_rx_bps'
+            site_id, device_id, port_id, start, end, metrics="tx_bps,rx_bps,max_tx_bps,max_rx_bps"
         )
-        if not result['success']:
-            return {
-                'success': False,
-                'rate_limited': result['rate_limited'],
-                'samples': []
-            }
+        if not result["success"]:
+            return {"success": False, "rate_limited": result["rate_limited"], "samples": []}
 
-        data = result['data'] or {}
+        data = result["data"] or {}
         # Mist insights stats return per-metric arrays aligned by index; also
         # commonly exposes 'start' and 'interval' at the envelope level.
-        interval = data.get('interval', HOUR_INTERVAL) or HOUR_INTERVAL
-        env_start = data.get('start', start)
-        tx = data.get('tx_bps', []) or []
-        rx = data.get('rx_bps', []) or []
-        max_tx = data.get('max_tx_bps', []) or []
-        max_rx = data.get('max_rx_bps', []) or []
+        interval = data.get("interval", HOUR_INTERVAL) or HOUR_INTERVAL
+        env_start = data.get("start", start)
+        tx = data.get("tx_bps", []) or []
+        rx = data.get("rx_bps", []) or []
+        max_tx = data.get("max_tx_bps", []) or []
+        max_rx = data.get("max_rx_bps", []) or []
         n = max(len(tx), len(rx), len(max_tx), len(max_rx))
 
         samples = []
         for i in range(n):
             ts = int(env_start + i * interval)
-            samples.append({
-                'timestamp': ts,
-                'hour_iso': hour_iso(ts),
-                'tx_bps': tx[i] if i < len(tx) else None,
-                'rx_bps': rx[i] if i < len(rx) else None,
-                'max_tx_bps': max_tx[i] if i < len(max_tx) else None,
-                'max_rx_bps': max_rx[i] if i < len(max_rx) else None,
-            })
+            samples.append(
+                {
+                    "timestamp": ts,
+                    "hour_iso": hour_iso(ts),
+                    "tx_bps": tx[i] if i < len(tx) else None,
+                    "rx_bps": rx[i] if i < len(rx) else None,
+                    "max_tx_bps": max_tx[i] if i < len(max_tx) else None,
+                    "max_rx_bps": max_rx[i] if i < len(max_rx) else None,
+                }
+            )
 
-        return {'success': True, 'rate_limited': False, 'samples': samples}
+        return {"success": True, "rate_limited": False, "samples": samples}
 
-    def get_gateway_hourly_wan_link_health(self, site_id: str, device_id: str, port_id: str,
-                                           start: int, end: int) -> Dict:
+    @staticmethod
+    def _parse_wan_link_health_arrays(data: dict) -> tuple[list, list, list]:
+        """Normalize wan_link_health payload shapes to (latency, jitter, loss) arrays."""
+        wlh = data.get("wan_link_health")
+        if isinstance(wlh, list):
+            latency_arr, jitter_arr, loss_arr = [], [], []
+            for entry in wlh:
+                if isinstance(entry, dict):
+                    latency_arr.append(entry.get("latency"))
+                    jitter_arr.append(entry.get("jitter"))
+                    loss_arr.append(entry.get("loss"))
+                else:
+                    latency_arr.append(None)
+                    jitter_arr.append(None)
+                    loss_arr.append(None)
+            return latency_arr, jitter_arr, loss_arr
+        if isinstance(wlh, dict):
+            return (
+                wlh.get("latency", []) or [],
+                wlh.get("jitter", []) or [],
+                wlh.get("loss", []) or [],
+            )
+        return (
+            data.get("latency", []) or [],
+            data.get("jitter", []) or [],
+            data.get("loss", []) or [],
+        )
+
+    def get_gateway_hourly_wan_link_health(
+        self, site_id: str, device_id: str, port_id: str, start: int, end: int
+    ) -> dict:
         """
         Return hourly jitter/latency/loss for one WAN port via the native
         wan_link_health insight metric. No fanout, no rollup, no peer_count.
@@ -1182,62 +1086,33 @@ class MistConnection:
               ]
             }
         """
-        result = self._insights_gateway_stats(
-            site_id, device_id, port_id, start, end,
-            metrics='wan_link_health'
-        )
-        if not result['success']:
-            return {
-                'success': False,
-                'rate_limited': result['rate_limited'],
-                'samples': []
-            }
+        result = self._insights_gateway_stats(site_id, device_id, port_id, start, end, metrics="wan_link_health")
+        if not result["success"]:
+            return {"success": False, "rate_limited": result["rate_limited"], "samples": []}
 
-        data = result['data'] or {}
-        interval = data.get('interval', HOUR_INTERVAL) or HOUR_INTERVAL
-        env_start = data.get('start', start)
+        data = result["data"] or {}
+        interval = data.get("interval", HOUR_INTERVAL) or HOUR_INTERVAL
+        env_start = data.get("start", start)
 
-        # wan_link_health typically arrives as either:
-        #   {'wan_link_health': [{'latency':..,'jitter':..,'loss':..}, ...]}
-        # or flattened per-metric arrays under nested keys. Support both.
-        wlh = data.get('wan_link_health')
-        latency_arr, jitter_arr, loss_arr = [], [], []
-
-        if isinstance(wlh, list):
-            for entry in wlh:
-                if isinstance(entry, dict):
-                    latency_arr.append(entry.get('latency'))
-                    jitter_arr.append(entry.get('jitter'))
-                    loss_arr.append(entry.get('loss'))
-                else:
-                    latency_arr.append(None)
-                    jitter_arr.append(None)
-                    loss_arr.append(None)
-        elif isinstance(wlh, dict):
-            latency_arr = wlh.get('latency', []) or []
-            jitter_arr = wlh.get('jitter', []) or []
-            loss_arr = wlh.get('loss', []) or []
-        else:
-            # Fallback: metric-per-array at the top level
-            latency_arr = data.get('latency', []) or []
-            jitter_arr = data.get('jitter', []) or []
-            loss_arr = data.get('loss', []) or []
+        latency_arr, jitter_arr, loss_arr = self._parse_wan_link_health_arrays(data)
 
         n = max(len(latency_arr), len(jitter_arr), len(loss_arr))
         samples = []
         for i in range(n):
             ts = int(env_start + i * interval)
-            samples.append({
-                'timestamp': ts,
-                'hour_iso': hour_iso(ts),
-                'avg_latency_ms': latency_arr[i] if i < len(latency_arr) else None,
-                'avg_jitter_ms': jitter_arr[i] if i < len(jitter_arr) else None,
-                'avg_loss_pct': loss_arr[i] if i < len(loss_arr) else None,
-            })
+            samples.append(
+                {
+                    "timestamp": ts,
+                    "hour_iso": hour_iso(ts),
+                    "avg_latency_ms": latency_arr[i] if i < len(latency_arr) else None,
+                    "avg_jitter_ms": jitter_arr[i] if i < len(jitter_arr) else None,
+                    "avg_loss_pct": loss_arr[i] if i < len(loss_arr) else None,
+                }
+            )
 
-        return {'success': True, 'rate_limited': False, 'samples': samples}
+        return {"success": True, "rate_limited": False, "samples": samples}
 
-    def _sle_app_health_get(self, site_id: str, sub_path: str, params: Optional[Dict] = None) -> Dict:
+    def _sle_app_health_get(self, site_id: str, sub_path: str, params: dict | None = None) -> dict:
         """
         Shared helper: GET /api/v1/sites/{site_id}/sle/site/{site_id}/metric/application-health/{sub_path}
         Returns {'success': bool, 'rate_limited': bool, 'data': dict|list|None}.
@@ -1245,16 +1120,10 @@ class MistConnection:
         import requests
 
         if self._is_rate_limited():
-            return {'success': False, 'rate_limited': True, 'data': None}
+            return {"success": False, "rate_limited": True, "data": None}
 
-        headers = {
-            'Authorization': f'Token {self.api_token}',
-            'Content-Type': 'application/json'
-        }
-        url = (
-            f'https://{self.host}/api/v1/sites/{site_id}'
-            f'/sle/site/{site_id}/metric/application-health/{sub_path}'
-        )
+        headers = {"Authorization": f"Token {self.api_token}", "Content-Type": "application/json"}
+        url = f"https://{self.host}/api/v1/sites/{site_id}" f"/sle/site/{site_id}/metric/application-health/{sub_path}"
 
         try:
             response = requests.get(url, headers=headers, params=params or {}, timeout=60)
@@ -1262,121 +1131,100 @@ class MistConnection:
             if response.status_code == 429:
                 switched = self._mark_token_rate_limited()
                 if switched:
-                    headers['Authorization'] = f'Token {self.api_token}'
+                    headers["Authorization"] = f"Token {self.api_token}"
                     response = requests.get(url, headers=headers, params=params or {}, timeout=60)
                     if response.status_code == 429:
                         self._mark_token_rate_limited()
 
                 if response.status_code != 200:
-                    return {'success': False, 'rate_limited': True, 'data': None}
+                    return {"success": False, "rate_limited": True, "data": None}
 
             if response.status_code == 200:
                 try:
-                    return {'success': True, 'rate_limited': False, 'data': response.json()}
+                    return {"success": True, "rate_limited": False, "data": response.json()}
                 except ValueError:
-                    return {'success': True, 'rate_limited': False, 'data': None}
+                    return {"success": True, "rate_limited": False, "data": None}
 
             # 400 or other = unavailable, treat as no-data (spec: return HTTP 200 unavailable case)
             logger.info(f"App Health SLE {sub_path} returned {response.status_code} for site {site_id}")
-            return {'success': False, 'rate_limited': False, 'data': None}
+            return {"success": False, "rate_limited": False, "data": None}
         except Exception as e:
             logger.warning(f"App Health SLE {sub_path} error site {site_id}: {e}")
-            return {'success': False, 'rate_limited': False, 'data': None}
+            return {"success": False, "rate_limited": False, "data": None}
 
-    def get_site_application_health(self, site_id: str, start: int, end: int) -> Dict:
-        """
-        Fetch the native Mist Application Health SLE (SSR) for a site.
+    @staticmethod
+    def _pct_from_good_total(good, total) -> float | None:
+        tot = total or 0
+        g = good or 0
+        return round(100.0 * g / tot, 2) if tot else None
 
-        Calls four sub-endpoints sequentially:
-          - summary            -> summary_pct
-          - summary-trend      -> trend[]  (hourly)
-          - impacted-interfaces -> impacted_interfaces[]
-          - threshold          -> threshold_pct
+    def _parse_app_health_summary(self, site_id: str) -> tuple[float | None, bool]:
+        s = self._sle_app_health_get(site_id, "summary")
+        if not (s["success"] and isinstance(s["data"], dict)):
+            return None, s["rate_limited"]
+        summary_pct = s["data"].get("sle")
+        if summary_pct is None:
+            summary_pct = self._pct_from_good_total(s["data"].get("good"), s["data"].get("total"))
+        return summary_pct, s["rate_limited"]
 
-        Returns:
-            {
-              'success': bool,
-              'rate_limited': bool,
-              'site_id': str,
-              'summary_pct': float|None,
-              'threshold_pct': float|None,
-              'trend': [{'timestamp': int, 'pct': float|None}, ...],
-              'impacted_interfaces': [
-                {'interface_name': str, 'gateway_hostname': str, 'gateway_mac': str,
-                 'duration': int, 'degraded': int, 'total': int}, ...
-              ]
-            }
-        """
-        rate_limited_any = False
-
-        # 1) summary
-        s = self._sle_app_health_get(site_id, 'summary')
-        rate_limited_any = rate_limited_any or s['rate_limited']
-        summary_pct = None
-        if s['success'] and isinstance(s['data'], dict):
-            # summary usually returns {"total": .., "good": .., "num_users":..} or {"sle": pct}
-            summary_pct = s['data'].get('sle')
-            if summary_pct is None:
-                total = s['data'].get('total') or 0
-                good = s['data'].get('good') or 0
-                if total > 0:
-                    summary_pct = round(100.0 * good / total, 2)
-
-        # 2) summary-trend
-        st = self._sle_app_health_get(site_id, 'summary-trend',
-                                      params={'interval': 3600, 'start': start, 'end': end})
-        rate_limited_any = rate_limited_any or st['rate_limited']
+    def _parse_app_health_trend(self, site_id: str, start: int, end: int) -> tuple[list, bool]:
+        st = self._sle_app_health_get(site_id, "summary-trend", params={"interval": 3600, "start": start, "end": end})
+        if not (st["success"] and isinstance(st["data"], dict)):
+            return [], st["rate_limited"]
+        samples = st["data"].get("results") or st["data"].get("trend") or []
+        env_start = st["data"].get("start", start)
+        interval = st["data"].get("interval", HOUR_INTERVAL) or HOUR_INTERVAL
         trend = []
-        if st['success'] and isinstance(st['data'], dict):
-            samples = st['data'].get('results') or st['data'].get('trend') or []
-            env_start = st['data'].get('start', start)
-            interval = st['data'].get('interval', HOUR_INTERVAL) or HOUR_INTERVAL
-            for i, entry in enumerate(samples):
-                if isinstance(entry, dict):
-                    ts = int(entry.get('time') or entry.get('timestamp') or (env_start + i * interval))
-                    pct = entry.get('sle')
-                    if pct is None:
-                        tot = entry.get('total') or 0
-                        good = entry.get('good') or 0
-                        pct = round(100.0 * good / tot, 2) if tot else None
-                    trend.append({'timestamp': ts, 'pct': pct})
-                else:
-                    ts = int(env_start + i * interval)
-                    trend.append({'timestamp': ts, 'pct': entry})
+        for i, entry in enumerate(samples):
+            if isinstance(entry, dict):
+                ts = int(entry.get("time") or entry.get("timestamp") or (env_start + i * interval))
+                pct = entry.get("sle")
+                if pct is None:
+                    pct = self._pct_from_good_total(entry.get("good"), entry.get("total"))
+                trend.append({"timestamp": ts, "pct": pct})
+            else:
+                trend.append({"timestamp": int(env_start + i * interval), "pct": entry})
+        return trend, st["rate_limited"]
 
-        # 3) impacted-interfaces
-        ii = self._sle_app_health_get(site_id, 'impacted-interfaces',
-                                      params={'start': start, 'end': end})
-        rate_limited_any = rate_limited_any or ii['rate_limited']
-        impacted_interfaces = []
-        if ii['success']:
-            payload = ii['data']
-            entries = payload.get('results', []) if isinstance(payload, dict) else (payload or [])
-            for row in entries:
-                if not isinstance(row, dict):
-                    continue
-                impacted_interfaces.append({
-                    'interface_name': row.get('interface') or row.get('port_id') or row.get('name') or '',
-                    'gateway_hostname': row.get('hostname') or row.get('gateway_hostname') or '',
-                    'gateway_mac': row.get('mac') or row.get('gateway_mac') or '',
-                    'duration': row.get('duration', 0),
-                    'degraded': row.get('degraded', 0),
-                    'total': row.get('total', 0),
-                })
+    def _parse_app_health_impacted(self, site_id: str, start: int, end: int) -> tuple[list, bool]:
+        ii = self._sle_app_health_get(site_id, "impacted-interfaces", params={"start": start, "end": end})
+        if not ii["success"]:
+            return [], ii["rate_limited"]
+        payload = ii["data"]
+        entries = payload.get("results", []) if isinstance(payload, dict) else (payload or [])
+        impacted = [
+            {
+                "interface_name": row.get("interface") or row.get("port_id") or row.get("name") or "",
+                "gateway_hostname": row.get("hostname") or row.get("gateway_hostname") or "",
+                "gateway_mac": row.get("mac") or row.get("gateway_mac") or "",
+                "duration": row.get("duration", 0),
+                "degraded": row.get("degraded", 0),
+                "total": row.get("total", 0),
+            }
+            for row in entries
+            if isinstance(row, dict)
+        ]
+        return impacted, ii["rate_limited"]
 
-        # 4) threshold
-        th = self._sle_app_health_get(site_id, 'threshold')
-        rate_limited_any = rate_limited_any or th['rate_limited']
-        threshold_pct = None
-        if th['success'] and isinstance(th['data'], dict):
-            threshold_pct = th['data'].get('threshold') or th['data'].get('sle')
+    def _parse_app_health_threshold(self, site_id: str) -> tuple[float | None, bool]:
+        th = self._sle_app_health_get(site_id, "threshold")
+        if not (th["success"] and isinstance(th["data"], dict)):
+            return None, th["rate_limited"]
+        return th["data"].get("threshold") or th["data"].get("sle"), th["rate_limited"]
+
+    def get_site_application_health(self, site_id: str, start: int, end: int) -> dict:
+        """Fetch native Mist Application Health SLE (summary/trend/impacted/threshold)."""
+        summary_pct, rl1 = self._parse_app_health_summary(site_id)
+        trend, rl2 = self._parse_app_health_trend(site_id, start, end)
+        impacted_interfaces, rl3 = self._parse_app_health_impacted(site_id, start, end)
+        threshold_pct, rl4 = self._parse_app_health_threshold(site_id)
 
         return {
-            'success': True,
-            'rate_limited': rate_limited_any,
-            'site_id': site_id,
-            'summary_pct': summary_pct,
-            'threshold_pct': threshold_pct,
-            'trend': trend,
-            'impacted_interfaces': impacted_interfaces,
+            "success": True,
+            "rate_limited": rl1 or rl2 or rl3 or rl4,
+            "site_id": site_id,
+            "summary_pct": summary_pct,
+            "threshold_pct": threshold_pct,
+            "trend": trend,
+            "impacted_interfaces": impacted_interfaces,
         }
