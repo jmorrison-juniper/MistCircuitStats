@@ -120,12 +120,16 @@ def get_gateway_ports(gateway_id):
 
 @app.route("/api/gateway/<gateway_id>/port/<path:port_id>/traffic")
 def get_port_traffic(gateway_id, port_id):
-    """Get time-series traffic data for a specific port"""
+    """Get time-series traffic data for a specific port.
+
+    Why: delegates to ``MistConnection.get_gateway_port_traffic_series`` so
+    the chart-modal request funnels through the shared multi-token 429
+    rotation instead of bypassing it with an inline ``requests.get``. The
+    response envelope ``{"success", "data": {"timestamps", "rx_bps",
+    "tx_bps"}}`` is byte-identical to the pre-migration route so the JS in
+    ``templates/index.html`` reads it unchanged.
+    """
     try:
-        from urllib.parse import unquote
-
-        import requests
-
         # Decode the port_id in case it's URL encoded
         port_id = unquote(port_id)
 
@@ -139,28 +143,12 @@ def get_port_traffic(gateway_id, port_id):
 
         logger.info(f"Fetching traffic for gateway {gateway_id}, port {port_id}, interval {interval}")
 
-        # Fetch from Mist insights API
-        headers = {"Authorization": f"Token {mist.api_token}", "Content-Type": "application/json"}
+        result = mist.get_gateway_port_traffic_series(site_id, gateway_id, port_id, start, end, interval)
 
-        url = f"https://{mist.host}/api/v1/sites/{site_id}/insights/gateway/{gateway_id}/stats"
-        params = {"interval": interval, "start": start, "end": end, "port_id": port_id, "metrics": "rx_bps,tx_bps"}
-
-        response = requests.get(url, headers=headers, params=params, timeout=30)
-
-        if response.status_code == 200:
-            data = response.json()
-
-            # Format response for frontend
-            result = {
-                "timestamps": [start + (i * interval) for i in range(len(data.get("rx_bps", [])))],
-                "rx_bps": data.get("rx_bps", []),
-                "tx_bps": data.get("tx_bps", []),
-            }
-
-            return jsonify({"success": True, "data": result})
-        else:
-            logger.error(f"Insights API error: {response.status_code}")
-            return jsonify({"success": False, "error": f"API error: {response.status_code}"}), 500
+        if result.get("success"):
+            return jsonify(result)
+        logger.error(f"Insights API error: {result.get('error')}")
+        return jsonify(result), 500
 
     except Exception as e:
         logger.error(f"Error fetching port traffic: {str(e)}")

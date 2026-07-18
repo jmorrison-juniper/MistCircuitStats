@@ -143,10 +143,10 @@ MIST_APITOKEN=token1,token2,token3
 ```text
 MistCircuitStats/
 ├── app.py                      # Flask entry point + WAN Insights routes
-├── mist_connection.py          # Mist API wrapper (SDK + direct REST)
+├── mist_connection.py          # Mist API wrapper (mistapi SDK)
 ├── templates/
 │   └── index.html              # Single-page UI (chart modal, WAN Insights)
-├── requirements.txt            # Flask, mistapi, gunicorn, python-dotenv, requests
+├── requirements.txt            # Flask, mistapi, gunicorn, python-dotenv
 ├── pyproject.toml              # Python >= 3.13 + tool configs
 ├── Dockerfile                  # python:3.13-slim, non-root, gunicorn
 ├── docker-compose.yml          # Runs the published GHCR image
@@ -159,14 +159,9 @@ MistCircuitStats/
 
 ## Mist API Endpoints
 
-The application talks to Mist in two ways:
-
-1. **`mistapi` Python SDK** — for endpoints with SDK coverage. Every call uses `mistapi.get_all(limit=1000)` for automatic pagination and is wrapped by a shared 429 handler that rotates tokens.
-2. **Direct `requests` calls** — for Insights and SLE endpoints not yet in the SDK. Same 429 / token-rotation pattern.
+Every Mist call goes through the `mistapi` Python SDK. Each call is wrapped by a shared 429 handler that marks the current token with a 60 s cooldown and rotates to the next available token; paginated list calls use `mistapi.get_all(limit=1000)`.
 
 > All 429 responses are handled transparently: the current token is marked with a 60 s cooldown and the next available token is used. If every token is exhausted, callers receive `success: true, rate_limited: {…}` with empty arrays — never a 429 exception.
-
-### SDK-based endpoints
 
 <details open>
 <summary><b>1. <code>getSelf</code> — discover org(s) the token can access</b></summary>
@@ -251,92 +246,73 @@ Only rows with `port_usage == "wan"` and a non-empty `ips[0]` in `"<ip>/<cidr>"`
 Also carries the gateway's `last_seen` timestamp used for the freshness label.
 </details>
 
-### Direct REST endpoints
-
 <details>
-<summary><b>12. VPN peer paths — <code>/orgs/{org_id}/stats/vpn_peers/search</code></b></summary>
+<summary><b>12. VPN peer paths — <code>searchOrgPeerPathStats</code></b></summary>
 
-```
-GET /api/v1/orgs/{org_id}/stats/vpn_peers/search?site_id=&mac=
-```
+**Path:** `mistapi.api.v1.orgs.stats.searchOrgPeerPathStats` (`org_id`, `site_id=`, `mac=`)
 
 Per-gateway peer-path stats: latency, loss, jitter, MOS, uptime, MTU, hop count per peer.
-Results are **grouped by `port_id`** on the client so the UI can render the count next to each WAN port. Not exposed by the SDK today.
+Results are **grouped by `port_id`** on the client so the UI can render the count next to each WAN port.
 </details>
 
 <details>
-<summary><b>13. WAN Insights bandwidth — <code>/insights/gateway/{device_id}/stats</code></b></summary>
+<summary><b>13. WAN Insights bandwidth — <code>getSiteInsightMetricsForGateway</code></b></summary>
 
-```
-GET /api/v1/sites/{site_id}/insights/gateway/{device_id}/stats
-    ?metrics=tx_bps,rx_bps,max_tx_bps,max_rx_bps
-    &port_id=&interval=&start=&end=
-```
+**Path:** `mistapi.api.v1.sites.insights.getSiteInsightMetricsForGateway` (`site_id`, `device_id`, `metrics="tx_bps,rx_bps,max_tx_bps,max_rx_bps"`, `port_id=`, `interval=`, `start=`, `end=`)
 
 Per-port **bandwidth**, average and peak, both directions.
 
 - `metrics=` is exactly those four names — avg + peak give the WAN Insights chart its "avg vs peak" pair.
-- `interval=1h` is the default; the 1h view sends `interval=10m` for six buckets.
+- `interval="1h"` is the default; the 1h view sends `interval="10m"` for six buckets.
 - Response arrays are aligned to `start + i * interval`.
 </details>
 
 <details>
-<summary><b>14. WAN link health — <code>/insights/device/{mac}/wan_link_health</code></b></summary>
+<summary><b>14. WAN link health — <code>getSiteInsightMetricsForDevice</code> (metric=<code>wan_link_health</code>)</b></summary>
 
-```
-GET /api/v1/sites/{site_id}/insights/device/{mac}/wan_link_health
-    ?port_id=&interval=&start=&end=
-```
+**Path:** `mistapi.api.v1.sites.insights.getSiteInsightMetricsForDevice` (`site_id`, `metric="wan_link_health"`, `device_mac=`, `port_id=`, `interval=`, `start=`, `end=`)
 
 Native per-port **jitter / latency / loss**.
 
-- **The `wan_link_health` insight is *device*-scoped, not gateway-scoped.** The metric name is in the URL path, and `mac = device_id.replace("-", "")[-12:]` (12-character lowercase tail, no separators).
+- **The `wan_link_health` insight is *device*-scoped, not gateway-scoped.** The metric name is the second positional argument, and `device_mac = device_id.replace("-", "")[-12:]` (12-character lowercase tail, no separators). This is why it goes through the `ForDevice` SDK function, not `ForGateway`.
 - Response payloads use top-level `avg_latency` / `avg_jitter` / `avg_loss` arrays; older shapes (nested `wan_link_health` dict / list) are tolerated.
 </details>
 
 <details>
-<summary><b>15. Application Health SLE — <code>/sle/.../application-health/summary-trend</code></b></summary>
+<summary><b>15. Application Health SLE — <code>getSiteSleSummaryTrend</code></b></summary>
 
-```
-GET /api/v1/sites/{site_id}/sle/site/{site_id}/metric/application-health/summary-trend
-    ?interval=&start=&end=
-```
+**Path:** `mistapi.api.v1.sites.sle.getSiteSleSummaryTrend` (`site_id`, `scope="site"`, `scope_id=site_id`, `metric="application-health"`, `start=`, `end=`)
 
 Native **Application Health SLE** — the summary percentage *and* the hourly trend both derive from this single payload.
 
-> **Non-obvious API quirk:** the standard `.../application-health/summary` endpoint returns HTTP 400 (`"unknown"`) for the `application-health` metric. `/summary-trend` returns 200 with `sle.samples.{total, degraded, value}` arrays instead.
+> **Non-obvious API quirk:** the standard `getSiteSleSummary` function returns HTTP 400 (`"unknown"`) for the `application-health` metric on the target org. `getSiteSleSummaryTrend` returns 200 with `sle.samples.{total, degraded, value}` arrays instead.
 > The app computes `summary_pct = 100 * (Σtotal − Σdegraded) / Σtotal` and uses `values[]` (falling back to per-bucket `(total-degraded)/total`) for the trend.
+> The SDK function does not accept an `interval` argument (Mist's API default of 3600 s applies).
 </details>
 
 <details>
-<summary><b>16. SLE impacted interfaces — <code>/sle/.../application-health/impacted-interfaces</code></b></summary>
+<summary><b>16. SLE impacted interfaces — <code>listSiteSleImpactedInterfaces</code></b></summary>
 
-```
-GET /api/v1/sites/{site_id}/sle/site/{site_id}/metric/application-health/impacted-interfaces
-```
+**Path:** `mistapi.api.v1.sites.sle.listSiteSleImpactedInterfaces` (`site_id`, `scope="site"`, `scope_id=site_id`, `metric="application-health"`, `start=`, `end=`)
 
 Gateways × WAN interfaces contributing to SLE degradation. Surfaced per-port so the WAN Insights panel can flag "impacted" for the current port.
 </details>
 
 <details>
-<summary><b>17. SLE threshold — <code>/sle/.../application-health/threshold</code></b></summary>
+<summary><b>17. SLE threshold — <code>getSiteSleThreshold</code></b></summary>
 
-```
-GET /api/v1/sites/{site_id}/sle/site/{site_id}/metric/application-health/threshold
-```
+**Path:** `mistapi.api.v1.sites.sle.getSiteSleThreshold` (`site_id`, `scope="site"`, `scope_id=site_id`, `metric="application-health"`)
 
 Configured SLE goal (e.g. `95`). Displayed next to the summary %. `null` when the SLE is not configured on the site.
 </details>
 
 <details>
-<summary><b>18. Legacy chart traffic — <code>/insights/gateway/{gateway_id}/stats</code> (RX/TX only)</b></summary>
+<summary><b>18. Legacy chart traffic — <code>getSiteInsightMetricsForGateway</code> (RX/TX only)</b></summary>
 
-```
-GET /api/v1/sites/{site_id}/insights/gateway/{gateway_id}/stats?metrics=rx_bps,tx_bps
-```
+**Path:** `mistapi.api.v1.sites.insights.getSiteInsightMetricsForGateway` (`site_id`, `gateway_id`, `metrics="rx_bps,tx_bps"`, `port_id=`, `interval=`, `start=`, `end=`)
 
 Backs the click-a-cell chart popup on the main gateway table.
-Kept alongside #13 because the chart modal wants a lighter single-metric-pair series.
+Kept alongside #13 because the chart modal wants a lighter single-metric-pair series at sub-hourly buckets (default 600 s). Reached through the `MistConnection.get_gateway_port_traffic_series` wrapper.
 </details>
 
 ---
