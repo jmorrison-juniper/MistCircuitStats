@@ -153,6 +153,6 @@ jobs:
     permissions:
       issues: write
       pull-requests: read
-    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-quality-gate-issues.yml@ca3659400847c35f5dac438c37fc5055c020910e # v0.2.0
+    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-quality-gate-issues.yml@e0bcb680817721a41d3add1dfb7498afeadb6503 # v0.3.0
     with:
       results: ${{ toJSON(needs) }}
