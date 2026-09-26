@@ -20,6 +20,14 @@ updates:
       - "ci"
     commit-message:
       prefix: "ci"
+    ignore:
+      # codeql.yml uses the floating v4 tag. Take only major updates. If
+      # Dependabot runs before GitHub moves the v4 tag, it replaces the tag
+      # with an exact version, as in PR #39.
+      - dependency-name: "github/codeql-action"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
 
   - package-ecosystem: "docker"
     directory: "/"
@@ -31,3 +39,9 @@ updates:
       - "docker"
     commit-message:
       prefix: "docker"
+    ignore:
+      # The Mist repositories stay on Python 3.13 for now. Remove this rule
+      # when all of them move to a newer Python.
+      - dependency-name: "python"
+        versions:
+          - ">= 3.14"
