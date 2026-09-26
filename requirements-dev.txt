@@ -1,0 +1,6 @@
+# Development and CI tools. The container image installs requirements.txt only.
+#
+# misthelper-devtools provides the complexity-gate command for the radon gate.
+# Pin a devtools release commit, and name the release tag in the comment.
+radon>=6,<7
+misthelper-devtools @ git+https://github.com/jmorrison-juniper/misthelper-devtools@ca3659400847c35f5dac438c37fc5055c020910e  # v0.2.0

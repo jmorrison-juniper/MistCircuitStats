@@ -6,77 +6,38 @@ on:
       - main
     tags:
       - '*.*.*.*.*'
+  # The auto-merge workflow starts this workflow after a merge, because a
+  # merge by GITHUB_TOKEN starts no push run.
   workflow_dispatch:
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/mistcircuitstats
+permissions: {}
 
 jobs:
+  # The shared workflow in misthelper-devtools builds the image with Buildx and
+  # pushes it to GHCR. The version is YY.MM.DD.HH.MM in UTC, and it is also an
+  # image tag.
   build-and-push:
-    runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       packages: write
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Container Registry
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata (tags, labels)
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=ref,event=tag
-            type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Generate version tag (YY.MM.DD.HH.MM)
-        id: version
-        run: |
-          VERSION=$(date -u +'%y.%m.%d.%H.%M')
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "Generated version: ${VERSION}"
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ steps.meta.outputs.tags }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            BUILD_DATE=${{ steps.version.outputs.version }}
-            VERSION=${{ steps.version.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-container-image.yml@ca3659400847c35f5dac438c37fc5055c020910e # v0.2.0
+    with:
+      image-name: ${{ github.repository_owner }}/mistcircuitstats
+      tags: |
+        type=ref,event=branch
+        type=ref,event=pr
+        type=ref,event=tag
+        type=sha
+        type=raw,value=latest,enable={{is_default_branch}}
+      version-tag: true
+      build-args: |
+        BUILD_DATE={version}
+        VERSION={version}
 
   release:
     name: Create GitHub Release
     needs: build-and-push
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -90,11 +51,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.build-and-push.outputs.version }}
+          IMAGE: ${{ needs.build-and-push.outputs.image }}
         run: |
           TAG="v${VERSION}"
-          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
           gh release create "${TAG}" \
             --target "${GITHUB_SHA}" \
             --title "${TAG}" \
             --generate-notes \
-            --notes "**Container image:** \`${IMAGE}\` (also tagged \`latest\`)"
+            --notes "**Container image:** \`${IMAGE}:${VERSION}\` (also tagged \`latest\`)"

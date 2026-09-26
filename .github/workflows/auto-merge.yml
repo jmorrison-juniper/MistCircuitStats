@@ -1,21 +1,25 @@
 name: Auto-merge
 
+# The shared workflow in misthelper-devtools enables auto-merge for a pull
+# request with the auto-merge label. A merge by GITHUB_TOKEN starts no push run
+# on main, so the shared workflow then starts each main workflow with a
+# workflow_dispatch call. The schedule is the backstop for a merge that starts
+# no closed event.
 on:
   pull_request:
-    types: [labeled, synchronize, opened, reopened]
+    types: [labeled, synchronize, opened, reopened, closed]
+  schedule:
+    - cron: '37 */6 * * *'
+  workflow_dispatch:
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
 
 jobs:
   auto-merge:
-    if: contains(github.event.pull_request.labels.*.name, 'auto-merge')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Enable auto-merge
-        uses: peter-evans/enable-pull-request-automerge@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          pull-request-number: ${{ github.event.pull_request.number }}
-          merge-method: squash
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-auto-merge.yml@ca3659400847c35f5dac438c37fc5055c020910e # v0.2.0
+    with:
+      main-workflows: 'quality-gates.yml codeql.yml build-and-push.yml'

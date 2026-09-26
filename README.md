@@ -862,6 +862,27 @@ CI runs on every push to `main` and every PR via `.github/workflows/quality-gate
 
 **Auto-issue automation on `main`:** failing gates open a `bug,ci,quality-gate` issue (one per failing gate); passing gates auto-close the corresponding open issue with a completion comment.
 
+### Shared tooling
+
+The CI tooling lives in [misthelper-devtools](https://github.com/jmorrison-juniper/misthelper-devtools). Each caller pins a devtools release commit, and a comment names the release tag.
+
+| Tooling | Source in misthelper-devtools |
+| --- | --- |
+| Complexity gate | The `complexity-gate` command. `requirements-dev.txt` installs it with radon. |
+| Gate issues | `reusable-quality-gate-issues.yml`, called from `quality-gates.yml` |
+| Auto-merge | `reusable-auto-merge.yml`, called from `auto-merge.yml` |
+| Linked issue close | `reusable-close-linked-issues.yml`, called from `close-linked-issues.yml` |
+| Container image | `reusable-container-image.yml`, called from `build-and-push.yml` |
+
+To run the complexity gate locally:
+
+```bash
+pip install -r requirements-dev.txt
+radon cc . -j --exclude '.github/*,.specify/*,docs/*,specs/*,templates/*' | complexity-gate --max 15
+```
+
+A merge by the auto-merge label uses `GITHUB_TOKEN`, so it starts no push run on `main`. The auto-merge workflow then starts the gates, CodeQL, and the container build with a `workflow_dispatch` call.
+
 ### Docstring policy
 
 Every public and private function, method, class, and module must have a docstring. First line is a short summary; a `Why:` line follows for anything non-trivial; parameters, returns, and raises use Google-style sections. The `interrogate` gate enforces the ≥ 90 % floor.
