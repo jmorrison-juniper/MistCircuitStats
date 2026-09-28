@@ -29,14 +29,23 @@ during the pre-1.0 phase (breaking changes may still land in minor bumps).
 - **Auto-file / auto-close CI issue automation.** On `main`, any failing
   quality gate opens a labelled GitHub issue (`bug,ci,quality-gate`), and a
   subsequent passing run auto-closes the corresponding issue with a
-  completion comment. See the `create_failure_issues` and
-  `close_resolved_issues` jobs in `.github/workflows/quality-gates.yml`.
+  completion comment. See the `quality_gate_issues` job in
+  `.github/workflows/quality-gates.yml`.
 - **Auto GitHub release on `main` build.** A successful main-branch build
   now cuts a GitHub release; `gh release create` is allowed to create the
   underlying tag directly so no committer identity is required in CI (#29,
   #30).
 
 ### Changed
+- **Shared CI workflows.** `quality-gates.yml` and `codeql.yml` call the
+  shared workflows of
+  [misthelper-devtools](https://github.com/jmorrison-juniper/misthelper-devtools),
+  pinned by commit SHA. Each gate keeps its tool, its arguments, and its job
+  ID, so the quality-gate issue titles do not change. The check names get
+  the prefix of the caller job, for example `gates / Ruff (lint)` and
+  `codeql / Analyze (python)`. `requirements-dev.txt` now pins each gate
+  tool, so Dependabot updates the tools, and a local run installs the
+  same tools as CI.
 - **Unified Mist API access under the `mistapi` SDK.** Retired the last 7
   direct-REST call sites in `mist_connection.py` and `app.py` so every Mist
   Cloud call now funnels through `MistConnection._handle_rate_limit_response`

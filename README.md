@@ -847,7 +847,7 @@ jitter_avg_ms, latency_avg_ms, loss_avg_pct
 
 ## Quality Gates
 
-CI runs on every push to `main` and every PR via `.github/workflows/quality-gates.yml`. All gates must pass:
+CI runs on every push to `main` and every PR via `.github/workflows/quality-gates.yml`, which calls the shared quality gate workflow of misthelper-devtools. Each gate is a separate check, for example `gates / Ruff (lint)`, and the `gates / Gate results` check sums them up. All gates must pass:
 
 | Gate                 | Tool          | Threshold / Notes                                                                                    |
 | -------------------- | ------------- | ---------------------------------------------------------------------------------------------------- |
@@ -868,16 +868,21 @@ The CI tooling lives in [misthelper-devtools](https://github.com/jmorrison-junip
 
 | Tooling | Source in misthelper-devtools |
 | --- | --- |
-| Complexity gate | The `complexity-gate` command. `requirements-dev.txt` installs it with radon. |
+| Quality gates | `reusable-python-quality-gates.yml`, called from `quality-gates.yml`. Each gate job installs `requirements-dev.txt`, which pins each gate tool. |
+| Complexity gate | The `complexity-gate` command. The radon gate installs it, and `requirements-dev.txt` installs it for a local run. |
 | Gate issues | `reusable-quality-gate-issues.yml`, called from `quality-gates.yml` |
+| CodeQL | `reusable-codeql.yml`, called from `codeql.yml` |
 | Auto-merge | `reusable-auto-merge.yml`, called from `auto-merge.yml` |
 | Linked issue close | `reusable-close-linked-issues.yml`, called from `close-linked-issues.yml` |
 | Container image | `reusable-container-image.yml`, called from `build-and-push.yml` |
 
-To run the complexity gate locally:
+To run the gates locally:
 
 ```bash
 pip install -r requirements-dev.txt
+ruff check . && black --check . && interrogate -v . && pydoclint .
+bandit -r . -ll -x ./.github,./.specify,./docs,./specs,./templates
+vulture . --min-confidence 90 --exclude .github,.specify,docs,specs,templates
 radon cc . -j --exclude '.github/*,.specify/*,docs/*,specs/*,templates/*' | complexity-gate --max 15
 ```
 

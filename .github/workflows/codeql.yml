@@ -1,5 +1,8 @@
 name: CodeQL
 
+# The shared workflow in misthelper-devtools runs the analysis. This file keeps
+# its name and the shared job keeps the job ID analyze, so code scanning keeps
+# the same configuration and the same alerts.
 on:
   push:
     branches: [main]
@@ -15,31 +18,14 @@ concurrency:
   group: codeql-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+permissions: {}
+
 jobs:
-  analyze:
-    name: Analyze (${{ matrix.language }})
-    runs-on: ubuntu-latest
+  codeql:
     permissions:
-      security-events: write
-      contents: read
       actions: read
-
-    strategy:
-      fail-fast: false
-      matrix:
-        language: [python]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
-        with:
-          languages: ${{ matrix.language }}
-          config-file: ./.github/codeql/codeql-config.yml
-
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4
-        with:
-          category: "/language:${{ matrix.language }}"
+      contents: read
+      security-events: write
+    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-codeql.yml@3f498b1f04da258f046894a3ea6718ea6968d583 # v0.5.1
+    with:
+      languages: '["python"]'
