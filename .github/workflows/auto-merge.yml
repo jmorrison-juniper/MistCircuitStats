@@ -20,6 +20,6 @@ jobs:
       actions: write
       contents: write
       pull-requests: write
-    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-auto-merge.yml@efd236ba17b0a7f9258ddac31168773a7af53e96 # main
+    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-auto-merge.yml@0936f174d26c82cb0a8ef0e6239fbabf2bf2fa25 # v0.5.0
     with:
       main-workflows: 'quality-gates.yml codeql.yml build-and-push.yml'
