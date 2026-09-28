@@ -26,6 +26,6 @@ jobs:
     permissions:
       issues: write
       pull-requests: read
-    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-close-linked-issues.yml@bf1ba8a29ee9bab27b721db6e613fd5cd83d82fa # v0.4.0
+    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-close-linked-issues.yml@efd236ba17b0a7f9258ddac31168773a7af53e96 # main
     with:
       lookback-hours: ${{ github.event.inputs.lookback-hours || '24' }}
