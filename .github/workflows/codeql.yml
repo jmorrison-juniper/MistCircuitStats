@@ -26,6 +26,6 @@ jobs:
       actions: read
       contents: read
       security-events: write
-    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-codeql.yml@3f498b1f04da258f046894a3ea6718ea6968d583 # v0.5.1
+    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-codeql.yml@0b969be7f60599f9a19ebc3069161f9353a1d830 # v0.5.2
     with:
       languages: '["python"]'
