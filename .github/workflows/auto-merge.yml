@@ -3,11 +3,24 @@ name: Auto-merge
 # The shared workflow in misthelper-devtools enables auto-merge for a pull
 # request with the auto-merge label. A merge by GITHUB_TOKEN starts no push run
 # on main, so the shared workflow then starts each main workflow with a
-# workflow_dispatch call. The schedule is the backstop for a merge that starts
-# no closed event.
+# workflow_dispatch call.
+#
+# A merged pull request stops reading its branch. A commit that reaches the
+# branch after the merge therefore has no pull request, and no reviewer and no
+# gate reads it. The push trigger lets the shared orphan job report that commit
+# on the merged pull request. The schedule is the backstop for a merge that
+# starts no closed event.
 on:
   pull_request:
     types: [labeled, synchronize, opened, reopened, closed]
+  # WHY this push trigger stays, although it starts one run for each push to a
+  # feature branch: the shared orphan job reads that push and reports a commit
+  # that arrived after its pull request merged. The repository deletes a branch
+  # on merge and squashes every merge, so an orphaned commit is easy to make and
+  # hard to see. One run for each push costs about one minute, and the schedule
+  # below cannot replace it, because a schedule reads no push event.
+  push:
+    branches-ignore: [main]
   schedule:
     - cron: '37 */6 * * *'
   workflow_dispatch:
@@ -23,3 +36,4 @@ jobs:
     uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-auto-merge.yml@b140350ebc40e61b57a3a65731c0df520f143661 # v0.6.0
     with:
       main-workflows: 'quality-gates.yml codeql.yml build-and-push.yml'
+      report-orphaned-push: true
