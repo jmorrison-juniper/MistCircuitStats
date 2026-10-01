@@ -12,4 +12,4 @@ pydoclint>=0.10.0,<0.11
 radon>=6.0.1,<7
 ruff>=0.16.9,<0.17
 vulture>=2.16,<3
-misthelper-devtools @ git+https://github.com/jmorrison-juniper/misthelper-devtools@0b969be7f60599f9a19ebc3069161f9353a1d830  # v0.5.2
+misthelper-devtools @ git+https://github.com/jmorrison-juniper/misthelper-devtools@b140350ebc40e61b57a3a65731c0df520f143661  # v0.6.0
