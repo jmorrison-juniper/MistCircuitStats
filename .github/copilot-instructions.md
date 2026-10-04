@@ -57,10 +57,11 @@ Flask web application for displaying Juniper Mist Gateway WAN port statistics us
 - Test container runs before committing: `podman run -p 5000:5000 --env-file .env mistcircuitstats:local-test`
 
 ## Dependency Management
-- `mistapi` requires `python-dotenv>=0.15.0,<0.17` (not 1.0+)
+- `mistapi` requires `python-dotenv>=1.1.0`; keep the runtime dependency ranges in `requirements.txt` compatible with the SDK metadata
 - Always check for dependency conflicts when updating packages
 - Use pip's dependency resolver output to identify version constraints
 - Keep requirements.txt version ranges compatible with all dependencies
+- Run the offline regression suite with `pytest` before committing
 
 ## Git Repository Management
 - Configure git user for repository: `git config user.name` and `git config user.email`

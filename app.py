@@ -48,7 +48,7 @@ def index():
 @app.route("/health")
 def health():
     """Health check endpoint for container orchestration"""
-    return jsonify({"status": "healthy", "timestamp": datetime.utcnow().isoformat()}), 200
+    return jsonify({"status": "healthy", "timestamp": datetime.now(UTC).isoformat()}), 200
 
 
 @app.route("/api/organization")
