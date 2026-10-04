@@ -7,7 +7,7 @@ requires-python = ">=3.13"
 [tool.ruff]
 line-length = 120
 target-version = "py313"
-extend-exclude = [".specify", "docs", "specs", "templates"]
+extend-exclude = [".specify", ".venv", "docs", "specs", "templates"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
@@ -18,14 +18,14 @@ ignore = ["E402"]
 [tool.black]
 line-length = 120
 target-version = ["py313"]
-extend-exclude = "\\.specify|docs|specs|templates"
+extend-exclude = "\\.specify|\\.venv|docs|specs|templates"
 
 [tool.bandit]
-exclude_dirs = [".github", ".specify", "docs", "specs", "templates"]
+exclude_dirs = [".github", ".specify", ".venv", "docs", "specs", "templates"]
 
 [tool.interrogate]
 fail-under = 90
-exclude = [".github", ".specify", "docs", "specs", "templates"]
+exclude = [".github", ".specify", ".venv", "docs", "specs", "templates"]
 ignore-init-method = false
 ignore-init-module = false
 ignore-magic = false
@@ -40,7 +40,7 @@ verbose = 2
 
 [tool.pydoclint]
 style = "google"
-exclude = '\.github|\.specify|docs|specs|templates'
+exclude = '\.github|\.specify|\.venv|docs|specs|templates'
 arg-type-hints-in-docstring = false
 arg-type-hints-in-signature = true
 check-return-types = false

@@ -847,18 +847,19 @@ jitter_avg_ms, latency_avg_ms, loss_avg_pct
 
 ## Quality Gates
 
-CI runs on every push to `main` and every PR via `.github/workflows/quality-gates.yml`, which calls the shared quality gate workflow of misthelper-devtools. Each gate is a separate check, for example `gates / Ruff (lint)`, and the `gates / Gate results` check sums them up. All gates must pass:
+CI runs offline regression tests and the shared quality gates on every push to `main` and every PR via `.github/workflows/quality-gates.yml`. Each quality gate is a separate check, for example `gates / Ruff (lint)`, and the `gates / Gate results` check sums them up. All checks must pass:
 
 | Gate                 | Tool          | Threshold / Notes                                                                                    |
 | -------------------- | ------------- | ---------------------------------------------------------------------------------------------------- |
 | Lint                 | `ruff`        | Selects `E, F, W, I, UP, B`. `E402` ignored (env-var load ordering in `app.py`).                     |
 | Format               | `black`       | Line length 120, `target-version = py313`.                                                            |
-| Security             | `bandit`      | `-ll` (medium+); excludes `.github`, `.specify`, `docs`, `specs`, `templates`.                       |
+| Security             | `bandit`      | `-ll` (medium+); excludes `.github`, `.specify`, `.venv`, `docs`, `specs`, `templates`.              |
 | CVE scan             | `pip-audit`   | Runs against `requirements.txt`.                                                                     |
 | Complexity           | `radon`       | Cyclomatic complexity **≤ 15** per function (hard fail above).                                       |
 | Dead code            | `vulture`     | Minimum confidence 90.                                                                                |
 | Docstring coverage   | `interrogate` | **≥ 90 %** (`fail-under = 90` in `pyproject.toml`).                                                   |
 | Docstring quality    | `pydoclint`   | Google style. `arg-type-hints-in-signature = true`, `skip-checking-short-docstrings = true`.          |
+| Offline regression tests | `pytest` | Exercises Flask routes and time-window helpers with mocked Mist API responses; no credentials or live API calls. |
 
 **Auto-issue automation on `main`:** failing gates open a `bug,ci,quality-gate` issue (one per failing gate); passing gates auto-close the corresponding open issue with a completion comment.
 
@@ -868,7 +869,7 @@ The CI tooling lives in [misthelper-devtools](https://github.com/jmorrison-junip
 
 | Tooling | Source in misthelper-devtools |
 | --- | --- |
-| Quality gates | `reusable-python-quality-gates.yml`, called from `quality-gates.yml`. Each gate job installs `requirements-dev.txt`, which pins each gate tool. |
+| Quality gates | `reusable-python-quality-gates.yml`, called from `quality-gates.yml`. Each gate job installs `requirements-dev.txt`, which constrains each gate tool to a tested release line. |
 | Complexity gate | The `complexity-gate` command. The radon gate installs it, and `requirements-dev.txt` installs it for a local run. |
 | Gate issues | `reusable-quality-gate-issues.yml`, called from `quality-gates.yml` |
 | CodeQL | `reusable-codeql.yml`, called from `codeql.yml` |
@@ -879,11 +880,12 @@ The CI tooling lives in [misthelper-devtools](https://github.com/jmorrison-junip
 To run the gates locally:
 
 ```bash
-pip install -r requirements-dev.txt
+pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest -q
 ruff check . && black --check . && interrogate -v . && pydoclint .
-bandit -r . -ll -x ./.github,./.specify,./docs,./specs,./templates
-vulture . --min-confidence 90 --exclude .github,.specify,docs,specs,templates
-radon cc . -j --exclude '.github/*,.specify/*,docs/*,specs/*,templates/*' | complexity-gate --max 15
+bandit -r . -ll -x ./.github,./.specify,./.venv,./docs,./specs,./templates
+vulture . --min-confidence 90 --exclude .github,.specify,.venv,docs,specs,templates
+radon cc . -j --exclude '.github/*,.specify/*,.venv/*,docs/*,specs/*,templates/*' | complexity-gate --max 15
 ```
 
 A merge by the auto-merge label uses `GITHUB_TOKEN`, so it starts no push run on `main`. The auto-merge workflow then starts the gates, CodeQL, and the container build with a `workflow_dispatch` call.

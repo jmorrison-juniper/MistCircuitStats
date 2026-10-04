@@ -17,8 +17,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  tests:
+    name: Offline regression tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Install application and test dependencies
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run offline regression tests
+        run: python -m pytest -q
+
   # The shared workflow in misthelper-devtools runs each gate as its own job.
-  # Each job installs requirements-dev.txt, which pins every gate tool. Each
+  # Each job installs requirements-dev.txt, which constrains every gate tool. Each
   # check name starts with the job ID, for example "gates / Ruff (lint)".
   gates:
     permissions:
@@ -30,13 +51,13 @@ jobs:
       ruff: true
       black: true
       bandit: true
-      bandit-args: -r . -ll -x ./.github,./.specify,./docs,./specs,./templates
+      bandit-args: -r . -ll -x ./.github,./.specify,./.venv,./docs,./specs,./templates
       pip-audit: true
       radon: true
-      radon-args: . --exclude .github/*,.specify/*,docs/*,specs/*,templates/*
+      radon-args: . --exclude .github/*,.specify/*,.venv/*,docs/*,specs/*,templates/*
       radon-max: 15
       vulture: true
-      vulture-args: . --min-confidence 90 --exclude .github,.specify,docs,specs,templates
+      vulture-args: . --min-confidence 90 --exclude .github,.specify,.venv,docs,specs,templates
       interrogate: true
       pydoclint: true
 
@@ -52,4 +73,3 @@ jobs:
     uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-quality-gate-issues.yml@b140350ebc40e61b57a3a65731c0df520f143661 # v0.6.0
     with:
       results: ${{ needs.gates.outputs.results }}
-

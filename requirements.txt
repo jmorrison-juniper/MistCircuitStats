@@ -1,5 +1,5 @@
-Flask
-mistapi
-gunicorn
-python-dotenv
-requests
+Flask>=3.1.3,<4
+mistapi>=0.64.0,<0.65
+gunicorn>=26.2.0,<27
+python-dotenv>=1.2.4,<2
+requests>=2.34.2,<3
