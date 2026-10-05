@@ -14,4 +14,8 @@ docker-compose*.yml
 **/__pycache__
 **/*.py[cod]
 .venv
+.venv-ste
+.venv-ste-ci
 venv
+AGENTS.md
+.ste-linter.toml

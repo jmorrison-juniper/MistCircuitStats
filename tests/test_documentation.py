@@ -1,5 +1,6 @@
 """Regression checks for landing documentation and offline screenshot fixtures."""
 
+import hashlib  # The docs test checks the immutable generic file by its SHA-256 digest.
 import re
 import struct
 import zlib
@@ -27,9 +28,27 @@ def test_landing_readme_sections() -> None:
     assert set(images) == SCREENSHOTS
 
 
+def test_agent_instruction_files_follow_the_two_file_model() -> None:
+    """Keep the canonical generic file and repository-specific context in place."""
+    generic_path = ROOT / "AGENTS.md"  # The test reads the canonical instruction copy.
+    repository_path = ROOT / ".github" / "copilot-instructions.md"  # The test reads local guidance.
+    generic_hash = hashlib.sha256(generic_path.read_bytes()).hexdigest()  # Detect drift in the generic file.
+    repository_text = repository_path.read_text()  # The text check verifies the Spec Kit pointer.
+    canonical_hash = "bf6d2bff3074941ecf2132acdfaa01edacdb1e7ef199961a910ebd9937021886"  # The expected source digest.
+    assert generic_hash == canonical_hash  # Keep the generic copy byte-identical.
+    assert "MistCircuitStats only" in repository_text  # Keep this file limited to local rules.
+    assert ".specify/memory/constitution.md" in repository_text  # The file must name the Spec Kit context.
+    assert "agents.md" not in {path.name for path in ROOT.iterdir()}  # Keep lowercase duplicate files retired.
+    retired_files = list((ROOT / ".github" / "instructions").glob("*.instructions.md"))  # Find retired paths.
+    assert not retired_files  # Keep retired instruction files absent.
+    specify_scripts = ROOT / ".specify" / "scripts"  # The test checks the Spec Kit script tree.
+    context_scripts = list(specify_scripts.rglob("update-agent-context.*"))  # Find scripts that write context.
+    assert not context_scripts  # Keep Spec Kit from replacing the instruction files.
+
+
 def test_local_documentation_links() -> None:
     """Require local Markdown links and fragments to resolve after documentation moves."""
-    documents = [ROOT / "README.md", *(ROOT / "docs").glob("*.md")]
+    documents = [ROOT / "README.md", ROOT / ".github" / "copilot-instructions.md", *(ROOT / "docs").glob("*.md")]
     for document in documents:
         for link in re.findall(r"!?\[[^\]]*\]\(([^)]+)\)", document.read_text()):
             parsed = urlsplit(link)

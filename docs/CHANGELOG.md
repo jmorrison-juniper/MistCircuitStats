@@ -11,6 +11,10 @@ during the pre-1.0 phase (breaking changes may still land in minor bumps).
 ## [Unreleased]
 
 ### Added
+- **Two-file agent instructions.** The root `AGENTS.md` now holds the generic
+  rules. `.github/copilot-instructions.md` holds the repository-specific rules.
+- **STE instruction checks.** The STE workflow checks both instruction files
+  and keeps the existing passing documentation files.
 - **Short-window WAN Insights timeframes.** The per-port hourly WAN Insights
   panel now supports **1h** and **6h** in addition to the existing 24h / 3d /
   7d selections. The 1h view uses a `10m` (600 s) sample interval — six
