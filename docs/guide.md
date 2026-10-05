@@ -95,6 +95,29 @@ podman-compose up -d
 podman run -d -p 5000:5000 --env-file .env ghcr.io/jmorrison-juniper/mistcircuitstats:latest
 ```
 
+### Test stack (no published port)
+
+Use `compose.test.yml` with `docker-compose.yml` for a test or a debug stack. The override builds
+the local image, publishes no host port, and removes the fixed container name. Compose then names
+the container from the project name, so two test stacks do not collide. The override needs Docker
+Compose 2.24.0 or later, because it uses the `!reset` tag.
+
+The app checks the token with Mist when it starts. Set a read-only `MIST_APITOKEN` in the shell or
+in `.env` before you start the stack. Give each stack a unique project name, such as
+`mistcircuitstats-56`.
+
+```bash
+podman compose -p mistcircuitstats-56 -f docker-compose.yml -f compose.test.yml config
+podman compose -p mistcircuitstats-56 -f docker-compose.yml -f compose.test.yml up -d --build --wait
+podman compose -p mistcircuitstats-56 -f docker-compose.yml -f compose.test.yml exec -T mistcircuitstats \
+  python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:5000/health').read().decode())"
+podman compose -p mistcircuitstats-56 -f docker-compose.yml -f compose.test.yml down --remove-orphans --volumes
+podman rmi mistcircuitstats:local-test
+```
+
+The `config` output shows no `ports` key and no `container_name` key. The `tests/test_compose.py`
+offline test asserts the same result.
+
 ---
 
 ## Configuration
