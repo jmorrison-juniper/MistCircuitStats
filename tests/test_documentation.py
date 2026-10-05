@@ -34,7 +34,7 @@ def test_agent_instruction_files_follow_the_two_file_model() -> None:
     repository_path = ROOT / ".github" / "copilot-instructions.md"  # The test reads local guidance.
     generic_hash = hashlib.sha256(generic_path.read_bytes()).hexdigest()  # Detect drift in the generic file.
     repository_text = repository_path.read_text()  # The text check verifies the Spec Kit pointer.
-    canonical_hash = "bf6d2bff3074941ecf2132acdfaa01edacdb1e7ef199961a910ebd9937021886"  # The expected source digest.
+    canonical_hash = "db663ecdfa28bd6000ca3c658bff22543791c15d3b59a3642ae181dc7c4e6d43"  # The expected source digest.
     assert generic_hash == canonical_hash  # Keep the generic copy byte-identical.
     assert "MistCircuitStats only" in repository_text  # Keep this file limited to local rules.
     assert ".specify/memory/constitution.md" in repository_text  # The file must name the Spec Kit context.

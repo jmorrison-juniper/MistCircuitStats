@@ -23,7 +23,7 @@ jobs:
   ste-lint:
     permissions:
       contents: read
-    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-ste-lint.yml@d00c9af1fccafe5858b76ad088a22ed8b046f8ae # d00c9af1 (v0.6.1)
+    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-ste-lint.yml@da02d4c6a2163d1882f2ad25fce80b8ba38304d1 # v0.6.2
     with:
       files: README.md AGENTS.md .github/copilot-instructions.md docs/customer_response_wan_insights.md .github/PULL_REQUEST_TEMPLATE.md
       config: .ste-linter.toml
