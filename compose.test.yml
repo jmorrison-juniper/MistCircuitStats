@@ -1,0 +1,25 @@
+# Test override for docker-compose.yml. It builds the local image, publishes
+# no host port, and removes the fixed container name.
+#
+# The app checks the token with Mist at startup. Set a read-only MIST_APITOKEN
+# in the shell or in .env before you start the stack.
+# Give each test stack a unique project name, for example:
+#   podman compose -p mistcircuitstats-56 -f docker-compose.yml -f compose.test.yml up -d --build --wait
+#
+# The "!reset" tag needs Docker Compose 2.24.0 or later.
+services:
+  mistcircuitstats:
+    build:
+      context: .
+      args:
+        VERSION: local-test
+    image: mistcircuitstats:local-test
+    # Compose then names the container from the project name, so stacks do not collide.
+    container_name: !reset null
+    restart: "no"
+    # A test stack publishes no host port. Read /health from inside the container.
+    ports: !reset []
+    # The config command then works without .env. Compose reads the token from the shell or .env.
+    env_file: !override
+      - path: .env
+        required: false

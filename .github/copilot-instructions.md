@@ -74,13 +74,24 @@ The app does not write data to Mist.
 
 ## Containers and ports
 
-The repository has two Compose files. `docker-compose.yml` runs the published image, and
-`docker-compose.dev.yml` builds the local image. Compose does not set a project name. Use
-`mistcircuitstats-<issue-or-pr>` as the project name for each test stack. Both files publish
-container port `5000` on host port `5000`. The files set fixed container names
-`mistcircuitstats` and `mistcircuitstats-dev`, so they cannot run parallel test stacks safely.
-Do not start a test stack from these files until the names and ports can change. Stop a local stack
-with `docker compose -f docker-compose.dev.yml down --remove-orphans`.
+The repository has two Compose files and one test override. `docker-compose.yml` runs the
+published image, and `docker-compose.dev.yml` builds the local image. Both files publish container
+port `5000` on host port `5000`. They set fixed container names `mistcircuitstats` and
+`mistcircuitstats-dev`. Do not start a test stack from these two files alone.
+
+Start each test or debug stack with the `compose.test.yml` override. The override builds the local
+image, publishes no host port, and removes the fixed container name. Use
+`mistcircuitstats-<issue-or-pr>` as the project name. Set a read-only `MIST_APITOKEN` first,
+because the app checks the token with Mist when it starts.
+
+```sh
+podman compose -p mistcircuitstats-<issue-or-pr> -f docker-compose.yml -f compose.test.yml up -d --build --wait
+podman compose -p mistcircuitstats-<issue-or-pr> -f docker-compose.yml -f compose.test.yml exec -T mistcircuitstats python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:5000/health').read().decode())"
+podman compose -p mistcircuitstats-<issue-or-pr> -f docker-compose.yml -f compose.test.yml down --remove-orphans --volumes
+```
+
+Remove the `mistcircuitstats:local-test` image when the test ends. The offline test
+`tests/test_compose.py` asserts that the merged test stack publishes no port and has no fixed name.
 
 The Dockerfile uses Python 3.13, runs as `appuser`, and checks `/health`. The shared container
 workflow builds `linux/amd64` and `linux/arm64` images. It uses the `YY.MM.DD.HH.MM` version format
@@ -113,7 +124,8 @@ The container workflow publishes multi-architecture images to GHCR.
 | `app.py` | Flask routes and app setup |
 | `mist_connection.py` | Mist API calls and data conversion |
 | `templates/index.html` | Browser dashboard |
-| `tests/` | Offline route, time-window, and documentation tests |
+| `tests/` | Offline route, time-window, type, Compose, and documentation tests |
+| `compose.test.yml` | Test stack override with no published port |
 | `docs/guide.md` | Setup, API, and quality gate details |
 | `docs/CHANGELOG.md` | Release history |
 | `.github/workflows/` | CI and release workflows |
