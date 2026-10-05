@@ -1,5 +1,7 @@
 # Changelog
 
+[Back to the landing README](../README.md)
+
 All notable changes to **MistCircuitStats** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
@@ -37,6 +39,11 @@ during the pre-1.0 phase (breaking changes may still land in minor bumps).
   #30).
 
 ### Changed
+- **Landing documentation (#53).** The root README now uses only What, How,
+  Where, When, Why and Who, with five genuine offline-fixture UI captures.
+  The detailed guide and this changelog are preserved under `docs/`, linked
+  from the landing page, with a reproducible screenshot harness and
+  documentation regression tests.
 - **Shared CI workflows.** `quality-gates.yml` and `codeql.yml` call the
   shared workflows of
   [misthelper-devtools](https://github.com/jmorrison-juniper/misthelper-devtools),
