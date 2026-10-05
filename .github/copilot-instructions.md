@@ -34,7 +34,7 @@ Run these commands from the repository root after you install the development to
 | Ruff lint | `ruff check .` | No findings |
 | Black format | `black --check .` | All files pass |
 | Python compile | `python -m compileall -q app.py mist_connection.py docs tests` | No syntax errors |
-| Type check | Not configured | The repository has no local type-check command |
+| Type check | `mypy .` | No issues found |
 | Bandit | `bandit -r . -ll -x ./.github,./.specify,./.venv,./.venv-ste,./.venv-ste-ci,./docs,./specs,./templates` | No findings |
 | Dependency audit | `pip-audit -r requirements.txt` | No known vulnerabilities |
 | Complexity | `radon cc . -j --exclude '.github/*,.specify/*,.venv/*,.venv-ste/*,.venv-ste-ci/*,docs/*,specs/*,templates/*' \| complexity-gate --max 15` | No function exceeds 15 |
@@ -46,7 +46,8 @@ Run these commands from the repository root after you install the development to
 | STE lint | `ste-linter --config .ste-linter.toml --min-score 80 README.md docs/customer_response_wan_insights.md .github/PULL_REQUEST_TEMPLATE.md AGENTS.md .github/copilot-instructions.md` | Each file scores at least 80 |
 
 The shared quality workflow runs only the gates enabled in `.github/workflows/quality-gates.yml`.
-The repository does not enable a mypy gate.
+The mypy gate reads its settings from `[tool.mypy]` in `pyproject.toml`. It reads the inline
+annotations of the `mistapi` SDK, so each gate job installs `requirements.txt` too.
 
 ## Architecture and conventions
 

@@ -49,3 +49,22 @@ skip-checking-raises = true
 check-arg-order = false
 skip-checking-short-docstrings = true
 allow-init-docstring = true
+
+[tool.mypy]
+python_version = "3.13"
+exclude = ['^\.github/', '^\.specify/', '^\.venv', '^docs/', '^specs/', '^templates/']
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+# mistapi ships inline annotations but no py.typed marker. Read its
+# annotations, so each SDK call is type-checked.
+[[tool.mypy.overrides]]
+module = ["mistapi", "mistapi.*"]
+follow_untyped_imports = true
+
+# docs/capture_screenshots.py imports Playwright inside a function. Playwright
+# is an optional tool for screenshots only, so no requirements file installs it.
+[[tool.mypy.overrides]]
+module = ["playwright", "playwright.*"]
+ignore_missing_imports = true
