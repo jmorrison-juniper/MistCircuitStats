@@ -47,9 +47,15 @@ jobs:
     uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-python-quality-gates.yml@b140350ebc40e61b57a3a65731c0df520f143661 # v0.6.0
     with:
       python-version: '3.13'
-      cache-dependency-path: requirements-dev.txt
+      cache-dependency-path: |
+        requirements.txt
+        requirements-dev.txt
+      # The mypy gate reads the Flask and mistapi annotations, so each gate job
+      # installs the runtime requirements as well as the gate tools.
+      install: python -m pip install -r requirements.txt -r requirements-dev.txt
       ruff: true
       black: true
+      mypy: true
       bandit: true
       bandit-args: -r . -ll -x ./.github,./.specify,./.venv,./docs,./specs,./templates
       pip-audit: true

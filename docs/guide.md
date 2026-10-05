@@ -855,6 +855,7 @@ CI runs offline regression tests and the shared quality gates on every push to `
 | -------------------- | ------------- | ---------------------------------------------------------------------------------------------------- |
 | Lint                 | `ruff`        | Selects `E, F, W, I, UP, B`. `E402` ignored (env-var load ordering in `app.py`).                     |
 | Format               | `black`       | Line length 120, `target-version = py313`.                                                            |
+| Types                | `mypy`        | Settings in `[tool.mypy]` in `pyproject.toml`. Reads the inline mistapi annotations. Ignores the optional Playwright import only. |
 | Security             | `bandit`      | `-ll` (medium+); excludes `.github`, `.specify`, `.venv`, `docs`, `specs`, `templates`.              |
 | CVE scan             | `pip-audit`   | Runs against `requirements.txt`.                                                                     |
 | Complexity           | `radon`       | Cyclomatic complexity **≤ 15** per function (hard fail above).                                       |
@@ -871,7 +872,7 @@ The CI tooling lives in [misthelper-devtools](https://github.com/jmorrison-junip
 
 | Tooling | Source in misthelper-devtools |
 | --- | --- |
-| Quality gates | `reusable-python-quality-gates.yml`, called from `quality-gates.yml`. Each gate job installs `requirements-dev.txt`, which constrains each gate tool to a tested release line. |
+| Quality gates | `reusable-python-quality-gates.yml`, called from `quality-gates.yml`. Each gate job installs `requirements.txt` and `requirements-dev.txt`. The second file constrains each gate tool to a tested release line. |
 | Complexity gate | The `complexity-gate` command. The radon gate installs it, and `requirements-dev.txt` installs it for a local run. |
 | Gate issues | `reusable-quality-gate-issues.yml`, called from `quality-gates.yml` |
 | CodeQL | `reusable-codeql.yml`, called from `codeql.yml` |
@@ -884,7 +885,7 @@ To run the gates locally:
 ```bash
 pip install -r requirements.txt -r requirements-dev.txt
 python -m pytest -q
-ruff check . && black --check . && interrogate -v . && pydoclint .
+ruff check . && black --check . && mypy . && interrogate -v . && pydoclint .
 bandit -r . -ll -x ./.github,./.specify,./.venv,./docs,./specs,./templates
 vulture . --min-confidence 90 --exclude .github,.specify,.venv,docs,specs,templates
 radon cc . -j --exclude '.github/*,.specify/*,.venv/*,docs/*,specs/*,templates/*' | complexity-gate --max 15
