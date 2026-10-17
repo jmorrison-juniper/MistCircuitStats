@@ -5,7 +5,7 @@
 # provides the complexity-gate command for the radon gate. Pin its release
 # commit and name the release tag in the comment.
 bandit>=1.9.4,<2
-black>=26.10.0,<27
+black>=26.10.1,<27
 interrogate>=1.7.0,<2
 mypy>=2.4.0,<3
 pip-audit>=2.10.1,<3
